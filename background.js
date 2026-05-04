@@ -138,20 +138,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "FLOW_HELPER_DOWNLOAD") {
+    console.log("Flow Helper: Received download request for:", message.url);
+    
+    // Validate URL
+    if (!message.url) {
+      console.error("Flow Helper: No URL provided for download");
+      sendResponse({ ok: false, error: "No URL provided" });
+      return true;
+    }
+    
     // Try queue-based download first
-    if (message.url) {
+    try {
       queueDownload(message.url);
       sendResponse({ ok: true, method: 'queued' });
-    } else {
+    } catch (error) {
+      console.error("Flow Helper: Queue download failed:", error);
+      
       // Fallback to direct download
       chrome.downloads.download({
         url: message.url,
         saveAs: false
       }).then((downloadId) => {
+        console.log("Flow Helper: Direct download started:", downloadId);
         sendResponse({ ok: true, downloadId, method: 'direct' });
-      }).catch((error) => {
-        console.error("Flow Helper: Background download failed", error);
-        sendResponse({ ok: false, error: error.message });
+      }).catch((downloadError) => {
+        console.error("Flow Helper: Direct download failed:", downloadError);
+        sendResponse({ ok: false, error: downloadError.message });
       });
     }
     return true;
@@ -166,13 +178,18 @@ chrome.downloads.onChanged.addListener((downloadItem) => {
   
   if (downloadItem.state) {
     if (downloadItem.state.current === 'complete') {
-      console.log(`Flow Helper: Download completed ${downloadItem.id}`);
+      console.log(`Flow Helper: Download completed ${downloadItem.id} - ${downloadItem.filename || 'unknown'}`);
       activeDownloads.splice(activeIndex, 1);
       processDownloadQueue(); // Process next in queue
     } else if (downloadItem.state.current === 'interrupted') {
-      console.warn(`Flow Helper: Download interrupted ${downloadItem.id}`);
+      console.warn(`Flow Helper: Download interrupted ${downloadItem.id} - ${downloadItem.error || 'unknown error'}`);
       activeDownloads.splice(activeIndex, 1);
       processDownloadQueue(); // Process next in queue
     }
+  }
+  
+  // Log filename changes to help debug what's being downloaded
+  if (downloadItem.filename) {
+    console.log(`Flow Helper: Download ${downloadItem.id} filename: ${downloadItem.filename.current || downloadItem.filename}`);
   }
 });

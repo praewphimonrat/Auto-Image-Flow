@@ -161,9 +161,32 @@
   }
 
   function findDownloadButton() {
-    return findButtonByMatcher((_button, buttonText, iconText) => {
-      return buttonText.includes("ดาวน์โหลด") || iconText.includes("download");
+    // ค้นหาปุ่มดาวน์โหลดที่เฉพาะเจาะจงสำหรับ Google Labs Flow
+    const downloadButtons = getButtonsByMatcher((button, buttonText, iconText) => {
+      // ตรวจสอบ icon ที่มี "download" 
+      const hasDownloadIcon = iconText.includes("download");
+      
+      // ตรวจสอบ text ที่มี "ดาวน์โหลด"
+      const hasDownloadText = buttonText.includes("ดาวน์โหลด");
+      
+      // ตรวจสอบ class ที่เฉพาะเจาะจง
+      const hasSpecificClass = button.classList.contains("sc-e8425ea6-0") || 
+                              button.classList.contains("gLXNUV") ||
+                              button.querySelector('i.google-symbols');
+      
+      // ตรวจสอบ data attributes
+      const hasDataState = button.hasAttribute("data-state");
+      
+      // ตรวจสอบ span ที่ซ่อนอยู่ที่มีข้อความ "ดาวน์โหลด"
+      const hiddenSpan = button.querySelector('span[style*="position: absolute"]');
+      const hasHiddenDownloadText = hiddenSpan && hiddenSpan.textContent.includes("ดาวน์โหลด");
+      
+      return (hasDownloadIcon || hasDownloadText || hasHiddenDownloadText) && 
+             (hasSpecificClass || hasDataState);
     });
+
+    // หาปุ่มที่ใกล้ที่สุดกับ reference element
+    return downloadButtons.length > 0 ? downloadButtons[0] : null;
   }
 
   function findDeleteTriggerButton() {
@@ -662,6 +685,8 @@
     // In background tabs rect is always 0 — treat as background
     const inBackground = isBackgroundTab() || (rect.width === 0 && rect.height === 0);
 
+    console.log(`Flow Helper: Clicking element in ${inBackground ? 'background' : 'foreground'} mode`);
+
     // Only scroll and focus if we are in foreground
     if (!inBackground) {
       element.scrollIntoView({
@@ -681,30 +706,61 @@
       clientX,
       clientY,
       button: 0,
-      view: window
+      view: window,
+      detail: 1
     };
 
-    const pointerEvents = ["pointerover", "pointerenter", "pointerdown", "pointerup"];
-    const mouseEvents = ["mouseover", "mouseenter", "mousedown", "mouseup"];
+    // Comprehensive event sequence for maximum compatibility
+    const events = [
+      'mouseenter',
+      'mouseover', 
+      'mousedown',
+      'mouseup',
+      'click'
+    ];
 
-    for (const eventName of pointerEvents) {
+    // Dispatch all mouse events
+    events.forEach(eventType => {
       try {
-        element.dispatchEvent(new PointerEvent(eventName, {
-          ...eventInit,
-          pointerId: 1,
-          pointerType: "mouse",
-          isPrimary: true
-        }));
-      } catch (_error) {}
+        element.dispatchEvent(new MouseEvent(eventType, eventInit));
+      } catch (error) {
+        console.warn(`Flow Helper: Failed to dispatch ${eventType}:`, error);
+      }
+    });
+
+    // Also try pointer events for modern browsers
+    try {
+      element.dispatchEvent(new PointerEvent('pointerdown', {
+        ...eventInit,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true
+      }));
+      element.dispatchEvent(new PointerEvent('pointerup', {
+        ...eventInit,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true
+      }));
+    } catch (error) {
+      console.warn('Flow Helper: Pointer events not supported');
     }
 
-    for (const eventName of mouseEvents) {
-      element.dispatchEvent(new MouseEvent(mouseEvents, eventInit));
+    // Direct click method
+    try {
+      element.click();
+    } catch (error) {
+      console.warn('Flow Helper: Direct click failed:', error);
     }
 
-    // Dispatch a direct click — most reliable even in background
-    element.dispatchEvent(new MouseEvent("click", { ...eventInit, bubbles: true, cancelable: true }));
-    element.click();
+    // Force focus and keyboard activation as backup
+    try {
+      element.focus();
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+    } catch (error) {
+      console.warn('Flow Helper: Keyboard activation failed:', error);
+    }
   }
 
   async function waitForCondition(predicate, options = {}) {
@@ -844,44 +900,56 @@
       throw new Error("Download button not found");
     }
 
-    // --- Strategy 1: Extract URL and use background download queue ---
-    const findUrl = (el) => {
-      const getVal = (node) => {
-        if (!node) return null;
-        const href = node.href || node.getAttribute?.("href");
-        if (href && (href.startsWith("http") || href.startsWith("blob:") || href.startsWith("data:"))) return href;
-        return node.getAttribute?.("data-url") || node.getAttribute?.("data-href") || node.getAttribute?.("src") || null;
-      };
+    console.log("Flow Helper: Found download button:", downloadButton);
 
-      let url = getVal(el);
-      if (url) return url;
-
-      // Check children and siblings
-      const candidates = el.querySelectorAll("a, img, video, source, [href], [data-url], [data-href], [src]");
-      for (const cand of candidates) {
-        url = getVal(cand);
-        if (url) return url;
-      }
-
-      // Walk up to find a wrapping anchor or container with a URL
-      let parent = el.parentElement;
-      for (let i = 0; i < 5 && parent; i++) {
-        url = getVal(parent);
-        if (url) return url;
-        const inner = parent.querySelectorAll("a, img, video, source, [href], [data-url], [data-href], [src]");
-        for (const cand of inner) {
-          url = getVal(cand);
-          if (url) return url;
+    // --- Strategy 1: Extract URL from various sources ---
+    const findDownloadUrl = (el) => {
+      const sources = [];
+      
+      // Check the button itself and nearby elements
+      const checkElement = (element, depth = 0) => {
+        if (!element || depth > 5) return;
+        
+        // Direct href
+        if (element.href) sources.push(element.href);
+        
+        // Data attributes
+        ['data-url', 'data-href', 'data-download-url', 'data-src'].forEach(attr => {
+          const val = element.getAttribute(attr);
+          if (val) sources.push(val);
+        });
+        
+        // Check parent and children
+        if (depth < 3) {
+          if (element.parentElement) checkElement(element.parentElement, depth + 1);
+          Array.from(element.children).forEach(child => checkElement(child, depth + 1));
         }
-        parent = parent.parentElement;
-      }
-
-      return null;
+      };
+      
+      checkElement(el);
+      
+      // Look for nearby links or images that might be the actual download
+      const nearbyElements = el.parentElement?.querySelectorAll('a[href], img[src], [data-url]') || [];
+      nearbyElements.forEach(elem => checkElement(elem));
+      
+      // Filter for valid URLs
+      return sources.find(url => 
+        url && (
+          url.startsWith('http') || 
+          url.startsWith('blob:') || 
+          url.startsWith('data:') ||
+          url.includes('.jpg') ||
+          url.includes('.png') ||
+          url.includes('.webp') ||
+          url.includes('.gif')
+        )
+      );
     };
 
-    const downloadUrl = findUrl(downloadButton);
+    const downloadUrl = findDownloadUrl(downloadButton);
+    
     if (downloadUrl) {
-      console.log("Flow Helper: Using background download queue", downloadUrl);
+      console.log("Flow Helper: Using background download API for:", downloadUrl);
       
       const response = await new Promise((resolve) => {
         chrome.runtime.sendMessage({ type: "FLOW_HELPER_DOWNLOAD", url: downloadUrl }, (res) => {
@@ -901,41 +969,52 @@
       console.warn("Flow Helper: Background download failed, trying click fallback", response?.error);
     }
 
-    // --- Strategy 2: Multiple click approaches ---
-    console.log("Flow Helper: Using click fallback approaches");
+    // --- Strategy 2: Comprehensive clicking approaches ---
+    console.log("Flow Helper: Using comprehensive click approaches");
     
-    // Approach 2a: Standard click with event simulation
+    // Approach 2a: Try to trigger any associated form submission
+    const form = downloadButton.closest('form');
+    if (form) {
+      console.log("Flow Helper: Trying form submission");
+      try {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        await delay(500);
+      } catch (error) {
+        console.warn("Flow Helper: Form submission failed:", error);
+      }
+    }
+    
+    // Approach 2b: Look for and click any nested anchor tags
+    const nestedAnchor = downloadButton.querySelector('a') || downloadButton.closest('a');
+    if (nestedAnchor) {
+      console.log("Flow Helper: Clicking nested anchor");
+      clickElement(nestedAnchor);
+      await delay(500);
+    }
+    
+    // Approach 2c: Main button click with comprehensive events
+    console.log("Flow Helper: Clicking main download button");
+    clickElement(downloadButton);
+    
+    // Approach 2d: Try to find and trigger any onclick handlers
     try {
-      clickElement(downloadButton);
-      
-      // Also try clicking any nested anchor
-      const anchor = downloadButton.querySelector("a[href]") || downloadButton.closest("a[href]");
-      if (anchor instanceof HTMLAnchorElement) {
-        anchor.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-        // Try programmatic click too
-        anchor.click();
+      if (downloadButton.onclick) {
+        console.log("Flow Helper: Triggering onclick handler");
+        downloadButton.onclick.call(downloadButton, new MouseEvent('click'));
       }
     } catch (error) {
-      console.warn("Flow Helper: Standard click failed", error);
+      console.warn("Flow Helper: onclick handler failed:", error);
     }
-
-    // Approach 2b: Try triggering download via form submission if button is in a form
+    
+    // Approach 2e: Check for React/Vue event handlers and trigger them
     try {
-      const form = downloadButton.closest("form");
-      if (form instanceof HTMLFormElement) {
-        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      const reactKey = Object.keys(downloadButton).find(key => key.startsWith('__reactInternalInstance'));
+      if (reactKey) {
+        console.log("Flow Helper: Found React component, triggering events");
+        downloadButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       }
     } catch (error) {
-      console.warn("Flow Helper: Form submission failed", error);
-    }
-
-    // Approach 2c: Try keyboard activation
-    try {
-      downloadButton.focus();
-      downloadButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      downloadButton.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
-    } catch (error) {
-      console.warn("Flow Helper: Keyboard activation failed", error);
+      console.warn("Flow Helper: React event handling failed:", error);
     }
 
     await delay(3000);
