@@ -28,7 +28,8 @@
       "js": [
         "content.js",
         "flow-page-actions.js",
-        "queue-panel.js"
+        "queue-panel.js",
+        "test-background-automation.js"
       ],
       "css": [
         "content.css"

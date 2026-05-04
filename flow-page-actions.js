@@ -840,7 +840,7 @@
       throw new Error("Download button not found");
     }
 
-    // --- Strategy 1: Find a direct URL in or near the button and use background download API ---
+    // --- Strategy 1: Extract URL and use background download queue ---
     const findUrl = (el) => {
       const getVal = (node) => {
         if (!node) return null;
@@ -852,8 +852,8 @@
       let url = getVal(el);
       if (url) return url;
 
-      // Check children
-      const candidates = el.querySelectorAll("a, img, video, [href], [data-url], [data-href], [src]");
+      // Check children and siblings
+      const candidates = el.querySelectorAll("a, img, video, source, [href], [data-url], [data-href], [src]");
       for (const cand of candidates) {
         url = getVal(cand);
         if (url) return url;
@@ -864,7 +864,7 @@
       for (let i = 0; i < 5 && parent; i++) {
         url = getVal(parent);
         if (url) return url;
-        const inner = parent.querySelectorAll("a, img, video, [href], [data-url], [data-href], [src]");
+        const inner = parent.querySelectorAll("a, img, video, source, [href], [data-url], [data-href], [src]");
         for (const cand of inner) {
           url = getVal(cand);
           if (url) return url;
@@ -877,7 +877,8 @@
 
     const downloadUrl = findUrl(downloadButton);
     if (downloadUrl) {
-      console.log("Flow Helper: Triggering background download via API", downloadUrl);
+      console.log("Flow Helper: Using background download queue", downloadUrl);
+      
       const response = await new Promise((resolve) => {
         chrome.runtime.sendMessage({ type: "FLOW_HELPER_DOWNLOAD", url: downloadUrl }, (res) => {
           if (chrome.runtime.lastError) {
@@ -889,20 +890,48 @@
       });
 
       if (response && response.ok) {
+        console.log(`Flow Helper: Download ${response.method} successful`);
         await delay(1500);
         return;
       }
-      console.warn("Flow Helper: Background download API failed, falling back to click", response?.error);
+      console.warn("Flow Helper: Background download failed, trying click fallback", response?.error);
     }
 
-    // --- Strategy 2: Aggressive click (works in foreground; best-effort in background) ---
-    console.log("Flow Helper: No direct URL found, using click fallback");
-    clickElement(downloadButton);
+    // --- Strategy 2: Multiple click approaches ---
+    console.log("Flow Helper: Using click fallback approaches");
+    
+    // Approach 2a: Standard click with event simulation
+    try {
+      clickElement(downloadButton);
+      
+      // Also try clicking any nested anchor
+      const anchor = downloadButton.querySelector("a[href]") || downloadButton.closest("a[href]");
+      if (anchor instanceof HTMLAnchorElement) {
+        anchor.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        // Try programmatic click too
+        anchor.click();
+      }
+    } catch (error) {
+      console.warn("Flow Helper: Standard click failed", error);
+    }
 
-    // Also try dispatching a synthetic click on any anchor inside the button area
-    const anchor = downloadButton.querySelector("a[href]") || downloadButton.closest("a[href]");
-    if (anchor instanceof HTMLAnchorElement) {
-      anchor.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    // Approach 2b: Try triggering download via form submission if button is in a form
+    try {
+      const form = downloadButton.closest("form");
+      if (form instanceof HTMLFormElement) {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
+    } catch (error) {
+      console.warn("Flow Helper: Form submission failed", error);
+    }
+
+    // Approach 2c: Try keyboard activation
+    try {
+      downloadButton.focus();
+      downloadButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      downloadButton.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    } catch (error) {
+      console.warn("Flow Helper: Keyboard activation failed", error);
     }
 
     await delay(3000);

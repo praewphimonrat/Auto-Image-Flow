@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Background Tab Download Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-section {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .download-btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .download-btn:hover {
+            background: #0056b3;
+        }
+        .download-btn i {
+            font-size: 18px;
+        }
+        .instructions {
+            background: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 20px 0;
+        }
+        .step {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f8f9fa;
+            border-left: 4px solid #007bff;
+        }
+        .status {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: #28a745;
+            color: white;
+            padding: 10px 15px;
+            border-radius: 6px;
+            font-weight: bold;
+        }
+        .hidden-download {
+            position: absolute;
+            left: -9999px;
+            opacity: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="status" id="page-status">
+        Tab Status: <span id="visibility-status">visible</span>
+    </div>
+
+    <h1>🧪 Background Tab Automation Test</h1>
+    
+    <div class="instructions">
+        <h3>📋 วิธีทดสอบ:</h3>
+        <div class="step">1. โหลด extension ใน Chrome</div>
+        <div class="step">2. เปิดหน้านี้ใน tab</div>
+        <div class="step">3. กดปุ่ม "Start Queue Test" ด้านล่าง</div>
+        <div class="step">4. <strong>เปลี่ยนไป tab อื่น</strong> (ให้หน้านี้เป็น background)</div>
+        <div class="step">5. รอ 30-60 วินาที แล้วกลับมาดู</div>
+        <div class="step">6. ถ้าเห็น log ว่า "Downloaded" แสดงว่าทำงานใน background ได้</div>
+    </div>
+
+    <div class="test-section">
+        <h3>🎯 Download Buttons (for testing)</h3>
+        
+        <button class="download-btn" onclick="simulateDownload('image1.jpg')">
+            <i>⬇️</i> ดาวน์โหลด รูปภาพ 1
+        </button>
+        
+        <button class="download-btn" onclick="simulateDownload('document.pdf')">
+            <i>📄</i> ดาวน์โหลด เอกสาร
+        </button>
+        
+        <a href="data:text/plain;charset=utf-8,Hello%20World" download="test-file.txt" class="download-btn">
+            <i>💾</i> ดาวน์โหลด ไฟล์ทดสอบ
+        </a>
+
+        <!-- Hidden download link for testing -->
+        <a href="https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf" 
+           download="test-pdf.pdf" 
+           class="hidden-download" 
+           id="hidden-download">Hidden Download</a>
+    </div>
+
+    <div class="test-section">
+        <h3>🚀 Automated Queue Test</h3>
+        <p>ทดสอบการทำงานอัตโนมัติใน background tab:</p>
+        
+        <button class="download-btn" onclick="startQueueTest()">
+            <i>▶️</i> Start Queue Test
+        </button>
+        
+        <button class="download-btn" onclick="stopQueueTest()" style="background: #dc3545;">
+            <i>⏹️</i> Stop Test
+        </button>
+
+        <div id="test-log" style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 6px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto;"></div>
+    </div>
+
+    <script>
+        let testInterval = null;
+        let testCount = 0;
+
+        // Monitor visibility changes
+        document.addEventListener('visibilitychange', () => {
+            const status = document.getElementById('visibility-status');
+            status.textContent = document.visibilityState;
+            status.parentElement.style.background = document.visibilityState === 'visible' ? '#28a745' : '#ffc107';
+            
+            log(`👁️ Tab visibility changed to: ${document.visibilityState}`);
+        });
+
+        function log(message) {
+            const logEl = document.getElementById('test-log');
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = `[${timestamp}] ${message}\n`;
+            logEl.textContent += entry;
+            logEl.scrollTop = logEl.scrollHeight;
+            console.log(message);
+        }
+
+        function simulateDownload(filename) {
+            log(`🎯 Manual download clicked: ${filename}`);
+            
+            // Create a temporary download link
+            const link = document.createElement('a');
+            link.href = `data:text/plain;charset=utf-8,Test content for ${filename}`;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            log(`✅ Download initiated: ${filename}`);
+        }
+
+        function startQueueTest() {
+            if (testInterval) {
+                clearInterval(testInterval);
+            }
+            
+            testCount = 0;
+            log('🚀 Starting automated queue test...');
+            log('💡 Switch to another tab now to test background functionality!');
+            
+            testInterval = setInterval(() => {
+                testCount++;
+                const filename = `auto-test-${testCount}.txt`;
+                
+                log(`🔄 Test cycle ${testCount}: Attempting download of ${filename}`);
+                log(`📊 Tab state: ${document.visibilityState}`);
+                
+                // Simulate clicking the hidden download button
+                const hiddenLink = document.getElementById('hidden-download');
+                if (hiddenLink) {
+                    hiddenLink.click();
+                    log(`✅ Clicked download button (visibility: ${document.visibilityState})`);
+                } else {
+                    log('❌ Download button not found');
+                }
+                
+                // Test if extension's background automation is working
+                if (window.FlowHelperPageActions) {
+                    try {
+                        window.FlowHelperPageActions.clickDownload().then(() => {
+                            log('✅ Extension download method succeeded');
+                        }).catch((error) => {
+                            log(`❌ Extension download method failed: ${error.message}`);
+                        });
+                    } catch (error) {
+                        log(`❌ Extension not available: ${error.message}`);
+                    }
+                }
+                
+                if (testCount >= 10) {
+                    stopQueueTest();
+                    log('🏁 Test completed after 10 cycles');
+                }
+            }, 5000); // Every 5 seconds
+        }
+
+        function stopQueueTest() {
+            if (testInterval) {
+                clearInterval(testInterval);
+                testInterval = null;
+                log('⏹️ Test stopped');
+            }
+        }
+
+        // Initialize
+        log('📄 Test page loaded');
+        log('🔍 Extension detection: ' + (window.FlowHelperPageActions ? 'Found' : 'Not found'));
+    </script>
+</body>
+</html>
