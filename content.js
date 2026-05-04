@@ -109,7 +109,9 @@ function injectVisibilitySpoofer() {
   try {
     const script = document.createElement("script");
     script.id = "flow-helper-visibility-spoofer";
-    script.textContent = `
+    
+    // Create the script content as a separate function to avoid CSP issues
+    const scriptContent = `
       (function() {
         if (window.__flowHelperVisibilitySpoofed) return;
         window.__flowHelperVisibilitySpoofed = true;
@@ -181,6 +183,8 @@ function injectVisibilitySpoofer() {
         console.log("Flow Helper: Visibility and Intersection spoofed");
       })();
     `;
+    
+    script.textContent = scriptContent;
     (document.head || document.documentElement).appendChild(script);
   } catch (error) {
     console.warn("Flow Helper: Could not inject visibility spoofer", error);

@@ -123,11 +123,12 @@
       const startTime = Date.now();
       
       // Use Web Worker timer (like in your code)
-      const timerWorker = new Worker(URL.createObjectURL(new Blob([
-        `self.onmessage = function(e) { 
-           setTimeout(() => self.postMessage(e.data), e.data.ms); 
-         };`
-      ], { type: "text/javascript" })));
+      const workerCode = `
+        self.onmessage = function(e) { 
+          setTimeout(() => self.postMessage(e.data), e.data.ms); 
+        };
+      `;
+      const timerWorker = new Worker(URL.createObjectURL(new Blob([workerCode], { type: "application/javascript" })));
 
       const id = Math.random();
       const handler = (e) => {

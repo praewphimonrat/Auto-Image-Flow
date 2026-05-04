@@ -103,7 +103,7 @@ async function closeOffscreen() {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "FLOW_HELPER_HEALTHCHECK") {
     sendResponse({
       ok: true,

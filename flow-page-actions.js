@@ -17,11 +17,12 @@
 
   // Use a Web Worker for delay to bypass background tab throttling
   const timerWorker = (function createTimerWorker() {
-    const blob = new Blob([
-      `self.onmessage = function(e) { 
-         setTimeout(() => self.postMessage(e.data), e.data.ms); 
-       };`
-    ], { type: "text/javascript" });
+    const workerCode = `
+      self.onmessage = function(e) { 
+        setTimeout(() => self.postMessage(e.data), e.data.ms); 
+      };
+    `;
+    const blob = new Blob([workerCode], { type: "application/javascript" });
     const url = URL.createObjectURL(blob);
     return new Worker(url);
   })();
