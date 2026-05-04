@@ -15,29 +15,32 @@
       .trim();
   }
 
-  // Use a Web Worker for delay to bypass background tab throttling
-  const timerWorker = (function createTimerWorker() {
-    const workerCode = `
-      self.onmessage = function(e) { 
-        setTimeout(() => self.postMessage(e.data), e.data.ms); 
-      };
-    `;
-    const blob = new Blob([workerCode], { type: "application/javascript" });
-    const url = URL.createObjectURL(blob);
-    return new Worker(url);
-  })();
-
+  // Use setTimeout with a wrapper to bypass background tab throttling
   function delay(ms) {
     return new Promise((resolve) => {
-      const id = Math.random();
-      const handler = (e) => {
-        if (e.data && e.data.id === id) {
-          timerWorker.removeEventListener("message", handler);
-          resolve();
-        }
-      };
-      timerWorker.addEventListener("message", handler);
-      timerWorker.postMessage({ id, ms });
+      // For very short delays, use setTimeout
+      if (ms < 1000) {
+        setTimeout(resolve, ms);
+        return;
+      }
+      
+      // For longer delays in background tabs, use chrome.alarms API
+      if (isBackgroundTab() && chrome.alarms) {
+        const alarmName = `flow-helper-delay-${Date.now()}-${Math.random()}`;
+        
+        const handler = (alarm) => {
+          if (alarm.name === alarmName) {
+            chrome.alarms.onAlarm.removeListener(handler);
+            resolve();
+          }
+        };
+        
+        chrome.alarms.onAlarm.addListener(handler);
+        chrome.alarms.create(alarmName, { delayInMinutes: ms / 60000 });
+      } else {
+        // Fallback to setTimeout for foreground or when alarms not available
+        setTimeout(resolve, ms);
+      }
     });
   }
 

@@ -8,13 +8,14 @@
     "activeTab",
     "offscreen",
     "tabs",
-    "downloads"
+    "downloads",
+    "alarms"
   ],
   "host_permissions": [
     "https://labs.google/fx/th/tools/flow/project/*"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self';"
+    "extension_pages": "script-src 'self'; object-src 'self'; worker-src 'none';"
   },
   "background": {
     "service_worker": "background.js"

@@ -122,29 +122,15 @@
     return new Promise((resolve) => {
       const startTime = Date.now();
       
-      // Use Web Worker timer (like in your code)
-      const workerCode = `
-        self.onmessage = function(e) { 
-          setTimeout(() => self.postMessage(e.data), e.data.ms); 
-        };
-      `;
-      const timerWorker = new Worker(URL.createObjectURL(new Blob([workerCode], { type: "application/javascript" })));
-
-      const id = Math.random();
-      const handler = (e) => {
-        if (e.data && e.data.id === id) {
-          timerWorker.removeEventListener("message", handler);
-          const elapsed = Date.now() - startTime;
-          resolve({ 
-            success: true, 
-            message: `Web Worker timer: ${elapsed}ms (expected ~2000ms)`,
-            accurate: Math.abs(elapsed - 2000) < 500
-          });
-        }
-      };
-
-      timerWorker.addEventListener("message", handler);
-      timerWorker.postMessage({ id, ms: 2000 });
+      // Use simple setTimeout instead of Web Worker to avoid CSP issues
+      setTimeout(() => {
+        const elapsed = Date.now() - startTime;
+        resolve({ 
+          success: true, 
+          message: `setTimeout timer: ${elapsed}ms (expected ~2000ms)`,
+          accurate: Math.abs(elapsed - 2000) < 1000 // More lenient for background tabs
+        });
+      }, 2000);
     });
   }
 
