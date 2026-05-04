@@ -107,85 +107,91 @@ function updateProjectInfo() {
 // Inject a script to spoof visibilityState to "visible" even when hidden
 function injectVisibilitySpoofer() {
   try {
-    const script = document.createElement("script");
-    script.id = "flow-helper-visibility-spoofer";
+    // Instead of injecting inline script, we'll modify the page directly
+    if (window.__flowHelperVisibilitySpoofed) return;
+    window.__flowHelperVisibilitySpoofed = true;
+
+    // Override document properties
+    Object.defineProperty(document, 'visibilityState', { 
+      value: 'visible', 
+      writable: false, 
+      configurable: true 
+    });
     
-    // Create the script content as a separate function to avoid CSP issues
-    const scriptContent = `
-      (function() {
-        if (window.__flowHelperVisibilitySpoofed) return;
-        window.__flowHelperVisibilitySpoofed = true;
-
-        Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: false, configurable: true });
-        Object.defineProperty(document, 'hidden', { value: false, writable: false, configurable: true });
-        Object.defineProperty(document, 'hasFocus', { value: () => true, writable: false, configurable: true });
-        window.focus = function() {}; // prevent focus stealing issues
-
-        const originalAddEventListener = document.addEventListener;
-        document.addEventListener = function(type, listener, options) {
-          if (type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'blur' || type === 'focusout') {
-            return; // Block visibility and focus-loss listeners
-          }
-          return originalAddEventListener.call(this, type, listener, options);
-        };
-
-        // Also block window-level blur/visibilitychange
-        const originalWindowAddEventListener = window.addEventListener;
-        window.addEventListener = function(type, listener, options) {
-          if (type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'blur' || type === 'focusout') {
-            return;
-          }
-          return originalWindowAddEventListener.call(this, type, listener, options);
-        };
-
-        // Shim requestAnimationFrame to continue running in background
-        const originalRAF = window.requestAnimationFrame;
-        window.requestAnimationFrame = function(callback) {
-          if (document.visibilityState === 'visible' && !window.__flowHelperForceRAFShim) {
-            // If tab is actually visible, use original for performance
-            // But since we spoofed visibilityState, we need a separate flag
-          }
-          // Always shim if we want 100% background reliability
-          return setTimeout(() => {
-            callback(performance.now());
-          }, 16); 
-        };
-
-        // Dispatch event once to clear any existing 'hidden' states
-        window.dispatchEvent(new Event('visibilitychange'));
-        window.dispatchEvent(new Event('focus'));
-
-        // Spoof IntersectionObserver to always report "intersecting"
-        const OriginalObserver = window.IntersectionObserver;
-        window.IntersectionObserver = function(callback, options) {
-          const observer = new OriginalObserver(callback, options);
-          const originalObserve = observer.observe;
-          
-          observer.observe = function(target) {
-            // Immediately trigger the callback with an "isIntersecting: true" entry
-            setTimeout(() => {
-              callback([{
-                target: target,
-                isIntersecting: true,
-                intersectionRatio: 1,
-                boundingClientRect: target.getBoundingClientRect(),
-                intersectionRect: target.getBoundingClientRect(),
-                rootBounds: {},
-                time: Date.now()
-              }], observer);
-            }, 0);
-            return originalObserve.call(this, target);
-          };
-          return observer;
-        };
-        window.IntersectionObserver.prototype = OriginalObserver.prototype;
-
-        console.log("Flow Helper: Visibility and Intersection spoofed");
-      })();
-    `;
+    Object.defineProperty(document, 'hidden', { 
+      value: false, 
+      writable: false, 
+      configurable: true 
+    });
     
-    script.textContent = scriptContent;
-    (document.head || document.documentElement).appendChild(script);
+    Object.defineProperty(document, 'hasFocus', { 
+      value: () => true, 
+      writable: false, 
+      configurable: true 
+    });
+
+    // Prevent focus stealing
+    if (window.focus) {
+      window.focus = function() {};
+    }
+
+    // Block visibility change listeners
+    const originalAddEventListener = document.addEventListener;
+    document.addEventListener = function(type, listener, options) {
+      if (type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'blur' || type === 'focusout') {
+        return; // Block these listeners
+      }
+      return originalAddEventListener.call(this, type, listener, options);
+    };
+
+    // Block window-level listeners
+    const originalWindowAddEventListener = window.addEventListener;
+    window.addEventListener = function(type, listener, options) {
+      if (type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'blur' || type === 'focusout') {
+        return;
+      }
+      return originalWindowAddEventListener.call(this, type, listener, options);
+    };
+
+    // Shim requestAnimationFrame
+    const originalRAF = window.requestAnimationFrame;
+    window.requestAnimationFrame = function(callback) {
+      return setTimeout(() => {
+        callback(performance.now());
+      }, 16);
+    };
+
+    // Dispatch events to clear existing states
+    window.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+
+    // Spoof IntersectionObserver
+    const OriginalObserver = window.IntersectionObserver;
+    if (OriginalObserver) {
+      window.IntersectionObserver = function(callback, options) {
+        const observer = new OriginalObserver(callback, options);
+        const originalObserve = observer.observe;
+        
+        observer.observe = function(target) {
+          setTimeout(() => {
+            callback([{
+              target: target,
+              isIntersecting: true,
+              intersectionRatio: 1,
+              boundingClientRect: target.getBoundingClientRect(),
+              intersectionRect: target.getBoundingClientRect(),
+              rootBounds: {},
+              time: Date.now()
+            }], observer);
+          }, 0);
+          return originalObserve.call(this, target);
+        };
+        return observer;
+      };
+      window.IntersectionObserver.prototype = OriginalObserver.prototype;
+    }
+
+    console.log("Flow Helper: Visibility and Intersection spoofed");
   } catch (error) {
     console.warn("Flow Helper: Could not inject visibility spoofer", error);
   }

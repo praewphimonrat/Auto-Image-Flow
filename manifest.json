@@ -15,7 +15,7 @@
     "https://labs.google/fx/th/tools/flow/project/*"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; worker-src 'none';"
+    "extension_pages": "script-src 'self'; object-src 'self';"
   },
   "background": {
     "service_worker": "background.js"
@@ -32,8 +32,7 @@
       "js": [
         "content.js",
         "flow-page-actions.js",
-        "queue-panel.js",
-        "test-background-automation.js"
+        "queue-panel.js"
       ],
       "css": [
         "content.css"
