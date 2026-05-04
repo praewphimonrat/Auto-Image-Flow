@@ -56,8 +56,12 @@
       const SILENT_AUDIO = "data:audio/wav;base64,UklGRigAAABXQVZFRm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==";
       state.silentAudio = new Audio(SILENT_AUDIO);
       state.silentAudio.loop = true;
-      state.silentAudio.play().catch(() => {
-        // May fail if no user gesture yet, but enqueue click should count
+      state.silentAudio.volume = 0; // Completely silent
+      state.silentAudio.play().then(() => {
+        console.log("Flow Helper: Tab silent audio started");
+      }).catch((error) => {
+        console.log("Flow Helper: Tab silent audio blocked (expected):", error.message);
+        // Expected - browser blocks autoplay without user interaction
       });
     } catch (error) {
       console.warn("Flow Helper: Could not start silent audio in tab", error);

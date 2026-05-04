@@ -1,38 +1,106 @@
-# Google Labs Flow Helper
+# Auto Image Flow - Chrome Extension
 
-Skeleton Chrome extension for pages that match:
+Chrome extension สำหรับการทำงานอัตโนมัติบน Google Labs Flow ที่สามารถทำงานใน background tab ได้
 
-- `https://labs.google/fx/th/tools/flow/project/*`
+## ✨ Features
 
-## Files
+- 🔄 **Background Tab Automation** - ทำงานต่อได้แม้เปลี่ยน tab
+- 📥 **Auto Download Queue** - จัดการการดาวน์โหลดหลายไฟล์
+- 🎯 **Smart Click Detection** - หาปุ่มดาวน์โหลดอัตโนมัติ
+- 🛡️ **Visibility Spoofing** - หลอก browser ให้คิดว่า tab ยัง active
+- ⚡ **Service Worker Keep-Alive** - รักษา extension ให้ทำงานต่อเนื่อง
 
-- `manifest.json`: Extension config for Manifest V3
-- `background.js`: Background service worker placeholder
-- `content.js`: Content script that mounts a right-side panel and keeps the page inset in sync
-- `flow-page-actions.js`: Page automation helpers for prompt input, progress waiting, download, and delete
-- `queue-panel.js`: Prompt queue UI, persistence, and automation loop controller
-- `content.css`: Injected styles for the docked panel and reserved page space
-- `popup.html`, `popup.css`, `popup.js`: Simple popup UI scaffold
+## 🚀 Installation
 
-## Current behavior
+1. ดาวน์โหลดโค้ดจาก GitHub
+2. เปิด Chrome → `chrome://extensions`
+3. เปิด "Developer mode"
+4. กด "Load unpacked" → เลือกโฟลเดอร์ extension
+5. ไปที่ Google Labs Flow และเริ่มใช้งาน
 
-- A docked panel appears on the right side of matching Flow project pages
-- The panel can be opened and closed from its own toggle button
-- When the panel is open, the extension reserves space on the right so the Flow page is pushed left instead of being covered
-- When the panel is closed, a floating `Open panel` button stays on the right edge so you can bring it back
-- The panel now includes a prompt textarea, queue list, start or pause controls, and queue persistence in `chrome.storage`
-- Queue processing follows this flow: fill prompt, click send, wait for progress to disappear, click download, click delete, confirm delete
-- If the current stage fails 3 times and has not recovered yet, the page refreshes once and then resumes from the saved queue state
+## 📖 How to Use
 
-## Load in Chrome
+### การใช้งานพื้นฐาน
+1. เปิด Google Labs Flow project
+2. Extension จะแสดง panel ทางขวา
+3. เพิ่ม prompt ลงใน queue
+4. กด "Start queue"
+5. **เปลี่ยนไป tab อื่นได้เลย** - extension จะทำงานต่อใน background
 
-1. Open `chrome://extensions`
-2. Turn on **Developer mode**
-3. Click **Load unpacked**
-4. Select the `google-fx-flow-extension` folder
+### การทดสอบ Background Automation
+1. เปิด `test-page.html` ใน browser
+2. กด "Start Queue Test"
+3. เปลี่ยนไป tab อื่นทันที
+4. รอ 30-60 วินาที แล้วกลับมาดู log
+5. ถ้าเห็น "✅ Clicked download button (visibility: hidden)" แสดงว่าทำงานได้
 
-## Next ideas
+## 🔧 Technical Details
 
-- Replace the placeholder panel in `content.js` with your real UI
-- Add message passing between popup, background, and content script
-- Expand `host_permissions` if you want the extension to support more locales or related pages
+### Architecture
+- **Manifest V3** - ใช้ Service Worker แทน background page
+- **Offscreen API** - รักษา service worker ให้ทำงานต่อเนื่อง
+- **Chrome Downloads API** - จัดการการดาวน์โหลดผ่าน background
+- **Content Script Injection** - แก้ไข page behavior
+
+### Background Tab Techniques
+1. **Visibility Spoofing** - Override `document.visibilityState`
+2. **Event Blocking** - Block `visibilitychange` listeners
+3. **RAF Shimming** - Replace `requestAnimationFrame` with `setTimeout`
+4. **Intersection Observer Spoofing** - Force elements to appear "visible"
+5. **Chrome Alarms** - Use for reliable timing in background
+
+### Download Strategies
+1. **URL Extraction** - หา download URL จาก DOM
+2. **Background Download API** - ใช้ `chrome.downloads.download()`
+3. **Multiple Click Fallbacks** - หลายวิธีในการ click ปุ่ม
+4. **Queue Management** - จัดการ concurrent downloads
+
+## 🛠️ Development
+
+### File Structure
+```
+├── manifest.json              # Extension configuration
+├── background.js              # Service worker + download queue
+├── content.js                 # Main content script + visibility spoofing
+├── flow-page-actions.js       # Page automation functions
+├── queue-panel.js             # Queue management UI
+├── offscreen.js               # Keep-alive mechanism
+├── offscreen.html             # Offscreen document
+├── content.css                # UI styling
+├── popup.html/js              # Extension popup
+└── test-background-automation.js  # Testing utilities
+```
+
+### Key Functions
+- `clickDownload()` - Smart download button detection
+- `fillPromptAndSubmit()` - Auto form filling
+- `waitForGenerationToFinish()` - Progress monitoring
+- `injectVisibilitySpoofer()` - Background tab spoofing
+
+## 🐛 Troubleshooting
+
+### Common Issues
+1. **CSP Violations** - ใช้ direct API calls แทน script injection
+2. **Audio Autoplay Blocked** - Expected behavior, ไม่กระทบการทำงาน
+3. **Service Worker Termination** - ใช้ offscreen document + alarms
+4. **Download Failures** - มี fallback หลายระดับ
+
+### Debug Tips
+- เปิด DevTools → Console เพื่อดู logs
+- ตรวจสอบ `chrome://extensions` สำหรับ errors
+- ใช้ test page เพื่อทดสอบ background functionality
+
+## 📝 License
+
+MIT License - ใช้งานและแก้ไขได้อย่างอิสระ
+
+## 🤝 Contributing
+
+1. Fork repository
+2. สร้าง feature branch
+3. Commit changes
+4. Push และสร้าง Pull Request
+
+---
+
+**หมายเหตุ:** Extension นี้ออกแบบมาสำหรับ Google Labs Flow โดยเฉพาะ แต่เทคนิคที่ใช้สามารถนำไปประยุกต์กับเว็บไซต์อื่นได้
