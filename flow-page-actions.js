@@ -40,12 +40,17 @@
     });
   }
 
+  function isBackgroundTab() {
+    // True when the tab is not the active/focused tab
+    return document.visibilityState === "hidden" || window.__flowHelperVisibilitySpoofed === true;
+  }
+
   function isVisible(element) {
     if (!(element instanceof HTMLElement)) {
       return false;
     }
 
-    // Check the element and its parents
+    // Check the element and its parents for display/visibility/opacity
     let current = element;
     while (current && current !== document.body) {
       const style = window.getComputedStyle(current);
@@ -55,9 +60,8 @@
       current = current.parentElement;
     }
 
-    // In background tabs (actual or spoofed), getBoundingClientRect often returns 0/0.
-    const isSpoofed = window.__flowHelperVisibilitySpoofed === true;
-    if (document.visibilityState === "hidden" || isSpoofed) {
+    // In background tabs getBoundingClientRect returns 0/0 — skip size check
+    if (isBackgroundTab()) {
       return true;
     }
 
@@ -651,10 +655,11 @@
     }
 
     const rect = element.getBoundingClientRect();
-    const isBackground = rect.width === 0 && rect.height === 0;
+    // In background tabs rect is always 0 — treat as background
+    const inBackground = isBackgroundTab() || (rect.width === 0 && rect.height === 0);
 
     // Only scroll and focus if we are in foreground
-    if (!isBackground) {
+    if (!inBackground) {
       element.scrollIntoView({
         block: "center",
         inline: "center"
@@ -662,13 +667,17 @@
       element.focus?.();
     }
 
-    // Force dispatching events with fallback coordinates for background
+    // Use centre of viewport as fallback coordinates for background clicks
+    const clientX = inBackground ? window.innerWidth / 2 : rect.left + rect.width / 2;
+    const clientY = inBackground ? window.innerHeight / 2 : rect.top + rect.height / 2;
+
     const eventInit = {
       bubbles: true,
       cancelable: true,
-      clientX: isBackground ? window.innerWidth / 2 : rect.left + rect.width / 2,
-      clientY: isBackground ? window.innerHeight / 2 : rect.top + rect.height / 2,
-      button: 0
+      clientX,
+      clientY,
+      button: 0,
+      view: window
     };
 
     const pointerEvents = ["pointerover", "pointerenter", "pointerdown", "pointerup"];
@@ -686,9 +695,11 @@
     }
 
     for (const eventName of mouseEvents) {
-      element.dispatchEvent(new MouseEvent(eventName, eventInit));
+      element.dispatchEvent(new MouseEvent(mouseEvents, eventInit));
     }
 
+    // Dispatch a direct click — most reliable even in background
+    element.dispatchEvent(new MouseEvent("click", { ...eventInit, bubbles: true, cancelable: true }));
     element.click();
   }
 
@@ -829,24 +840,38 @@
       throw new Error("Download button not found");
     }
 
-    // Aggressively search for a download URL to use Background API
+    // --- Strategy 1: Find a direct URL in or near the button and use background download API ---
     const findUrl = (el) => {
       const getVal = (node) => {
         if (!node) return null;
-        const href = node.href || node.getAttribute("href");
+        const href = node.href || node.getAttribute?.("href");
         if (href && (href.startsWith("http") || href.startsWith("blob:") || href.startsWith("data:"))) return href;
-        return node.getAttribute("data-url") || node.getAttribute("data-href") || node.getAttribute("src");
+        return node.getAttribute?.("data-url") || node.getAttribute?.("data-href") || node.getAttribute?.("src") || null;
       };
 
       let url = getVal(el);
       if (url) return url;
 
       // Check children
-      const candidates = el.querySelectorAll("a, img, [href], [data-url], [data-href], [src]");
+      const candidates = el.querySelectorAll("a, img, video, [href], [data-url], [data-href], [src]");
       for (const cand of candidates) {
         url = getVal(cand);
         if (url) return url;
       }
+
+      // Walk up to find a wrapping anchor or container with a URL
+      let parent = el.parentElement;
+      for (let i = 0; i < 5 && parent; i++) {
+        url = getVal(parent);
+        if (url) return url;
+        const inner = parent.querySelectorAll("a, img, video, [href], [data-url], [data-href], [src]");
+        for (const cand of inner) {
+          url = getVal(cand);
+          if (url) return url;
+        }
+        parent = parent.parentElement;
+      }
+
       return null;
     };
 
@@ -862,15 +887,24 @@
           }
         });
       });
-      
+
       if (response && response.ok) {
         await delay(1500);
         return;
       }
+      console.warn("Flow Helper: Background download API failed, falling back to click", response?.error);
     }
 
-    // Fallback to aggressive click
+    // --- Strategy 2: Aggressive click (works in foreground; best-effort in background) ---
+    console.log("Flow Helper: No direct URL found, using click fallback");
     clickElement(downloadButton);
+
+    // Also try dispatching a synthetic click on any anchor inside the button area
+    const anchor = downloadButton.querySelector("a[href]") || downloadButton.closest("a[href]");
+    if (anchor instanceof HTMLAnchorElement) {
+      anchor.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
+
     await delay(3000);
   }
 

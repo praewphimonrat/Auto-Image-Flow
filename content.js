@@ -117,13 +117,23 @@ function injectVisibilitySpoofer() {
         Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: false, configurable: true });
         Object.defineProperty(document, 'hidden', { value: false, writable: false, configurable: true });
         Object.defineProperty(document, 'hasFocus', { value: () => true, writable: false, configurable: true });
-        
+        window.focus = function() {}; // prevent focus stealing issues
+
         const originalAddEventListener = document.addEventListener;
         document.addEventListener = function(type, listener, options) {
           if (type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'blur' || type === 'focusout') {
             return; // Block visibility and focus-loss listeners
           }
           return originalAddEventListener.call(this, type, listener, options);
+        };
+
+        // Also block window-level blur/visibilitychange
+        const originalWindowAddEventListener = window.addEventListener;
+        window.addEventListener = function(type, listener, options) {
+          if (type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'blur' || type === 'focusout') {
+            return;
+          }
+          return originalWindowAddEventListener.call(this, type, listener, options);
         };
 
         // Shim requestAnimationFrame to continue running in background
