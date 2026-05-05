@@ -4,6 +4,9 @@
   }
 
   const FLOW_HELPER_ROOT_ID = "autogen-flow-helper-root";
+  const DOWNLOAD_ACTIVATION_WINDOW_MS = 3000;
+  let lastDownloadActivationKey = "";
+  let lastDownloadActivationAt = 0;
 
   function normalizeText(value) {
     return String(value || "")
@@ -763,6 +766,298 @@
     }
   }
 
+  function getDownloadActivationTarget(downloadButton) {
+    const anchor = downloadButton.querySelector("a[href]") || downloadButton.closest("a[href]");
+    return anchor instanceof HTMLElement ? anchor : downloadButton;
+  }
+
+  function getDownloadActivationKey(target, downloadUrl) {
+    const directUrl =
+      downloadUrl ||
+      target.href ||
+      target.getAttribute("href") ||
+      target.getAttribute("data-url") ||
+      target.getAttribute("data-href") ||
+      target.getAttribute("data-download-url") ||
+      target.getAttribute("data-src");
+
+    if (directUrl) {
+      return `url:${String(directUrl).trim()}`;
+    }
+
+    return [
+      "element",
+      window.location.pathname,
+      target.tagName,
+      target.id || "",
+      typeof target.className === "string" ? target.className : "",
+      normalizeText(target.textContent).slice(0, 120)
+    ].join(":");
+  }
+
+  function markDownloadActivation(key) {
+    const now = Date.now();
+
+    if (key && key === lastDownloadActivationKey && now - lastDownloadActivationAt < DOWNLOAD_ACTIVATION_WINDOW_MS) {
+      console.warn("Flow Helper: Skipping duplicate download activation", key);
+      return false;
+    }
+
+    lastDownloadActivationKey = key;
+    lastDownloadActivationAt = now;
+    return true;
+  }
+
+  function activateDownloadTargetOnce(target) {
+    if (!(target instanceof HTMLElement)) {
+      throw new Error("Download target is missing");
+    }
+
+    const rect = target.getBoundingClientRect();
+    const inBackground = isBackgroundTab() || (rect.width === 0 && rect.height === 0);
+
+    if (!inBackground) {
+      target.scrollIntoView({
+        block: "center",
+        inline: "center"
+      });
+      target.focus?.();
+    }
+
+    try {
+      target.click();
+    } catch (error) {
+      console.warn("Flow Helper: Native download click failed, dispatching one click event", error);
+      target.dispatchEvent(new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        button: 0
+      }));
+    }
+  }
+
+  function sendRuntimeMessage(message) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+
+        resolve(response || {});
+      });
+    });
+  }
+
+  function isFlowContentImageUrl(url) {
+    try {
+      const parsedUrl = new URL(url);
+      return parsedUrl.hostname === "flow-content.google" && parsedUrl.pathname.startsWith("/image/");
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function getLatestPerformanceImage(after = 0) {
+    const afterTimestamp = Number.isFinite(after) ? after : 0;
+    const timeOrigin = Number.isFinite(performance.timeOrigin) ? performance.timeOrigin : Date.now();
+
+    return performance.getEntriesByType("resource")
+      .filter((entry) => {
+        if (!entry?.name || !isFlowContentImageUrl(entry.name)) {
+          return false;
+        }
+
+        const completedAt = Math.round(timeOrigin + (entry.responseEnd || entry.startTime || 0));
+        return completedAt >= afterTimestamp;
+      })
+      .map((entry) => ({
+        url: entry.name,
+        timestamp: Math.round(timeOrigin + (entry.responseEnd || entry.startTime || 0)),
+        source: "performance",
+        initiatorType: entry.initiatorType || ""
+      }))
+      .sort((left, right) => right.timestamp - left.timestamp)[0] || null;
+  }
+
+  function getFlowImageFilename(url, contentType = "") {
+    let id = `flow-image-${Date.now()}`;
+
+    try {
+      id = new URL(url).pathname.split("/").filter(Boolean).pop() || id;
+    } catch (_error) {
+      // Keep timestamp fallback.
+    }
+
+    const normalizedType = String(contentType || "").toLowerCase();
+    const extension =
+      normalizedType.includes("png") ? "png" :
+        normalizedType.includes("webp") ? "webp" :
+          normalizedType.includes("gif") ? "gif" :
+            "jpg";
+
+    return `${id}.${extension}`;
+  }
+
+  async function downloadImageViaFetchBlob(url) {
+    const downloadUrl = String(url || "").trim();
+
+    if (!downloadUrl) {
+      throw new Error("No network image URL provided");
+    }
+
+    if (!markDownloadActivation(`network-fetch:${downloadUrl}`)) {
+      return {
+        ok: true,
+        method: "network-fetch-deduped",
+        url: downloadUrl
+      };
+    }
+
+    console.log("Flow Helper: Downloading network image with fetch/blob", downloadUrl);
+
+    const response = await fetch(downloadUrl, {
+      method: "GET",
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Network image fetch failed: ${response.status} ${response.statusText}`);
+    }
+
+    const contentType = response.headers.get("content-type") || "image/jpeg";
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const filename = getFlowImageFilename(downloadUrl, contentType);
+
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+
+    setTimeout(() => {
+      URL.revokeObjectURL(objectUrl);
+      anchor.remove();
+    }, 30000);
+
+    return {
+      ok: true,
+      method: "network-fetch-blob",
+      url: downloadUrl,
+      filename,
+      size: blob.size,
+      contentType
+    };
+  }
+
+  async function resetNetworkCapture() {
+    const response = await sendRuntimeMessage({ type: "FLOW_HELPER_NETWORK_CAPTURE_RESET" });
+
+    if (response?.ok && Number.isFinite(response.timestamp)) {
+      return response.timestamp;
+    }
+
+    console.warn("Flow Helper: Background network capture reset failed", response?.error);
+    return Date.now();
+  }
+
+  async function getLatestNetworkImageEntry(after = 0) {
+    const response = await sendRuntimeMessage({
+      type: "FLOW_HELPER_GET_LATEST_NETWORK_IMAGE",
+      after
+    });
+
+    if (response?.ok && response.entry?.url) {
+      return {
+        ...response.entry,
+        source: "webRequest"
+      };
+    }
+
+    return getLatestPerformanceImage(after);
+  }
+
+  async function waitForNetworkImage(options = {}) {
+    const check = typeof options.check === "function" ? options.check : () => {};
+    const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
+    const after = Number.isFinite(options.after) ? options.after : 0;
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 20 * 60 * 1000;
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      check();
+
+      const entry = await getLatestNetworkImageEntry(after);
+
+      if (entry?.url) {
+        return entry;
+      }
+
+      onProgress("waiting-network-image");
+      await delay(1000);
+    }
+
+    throw new Error("Network image request did not appear before timeout");
+  }
+
+  async function downloadNetworkImageWithBackground(url) {
+    const response = await sendRuntimeMessage({
+      type: "FLOW_HELPER_DOWNLOAD",
+      url
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Background network download failed");
+    }
+
+    return response;
+  }
+
+  async function downloadLatestNetworkImage(options = {}) {
+    const after = Number.isFinite(options.after) ? options.after : 0;
+    const response = await sendRuntimeMessage({
+      type: "FLOW_HELPER_DOWNLOAD_LATEST_NETWORK_IMAGE",
+      after
+    });
+
+    if (response?.ok) {
+      console.log("Flow Helper: Network download queued from background", response.entry || response.url);
+      await delay(1000);
+      return response;
+    }
+
+    const performanceEntry = getLatestPerformanceImage(after);
+
+    if (performanceEntry) {
+      try {
+        const backgroundResult = await downloadNetworkImageWithBackground(performanceEntry.url);
+        console.log("Flow Helper: Network download queued from performance entries", performanceEntry);
+        await delay(1000);
+        return {
+          ...backgroundResult,
+          method: backgroundResult.method === "deduped" ? "deduped" : "network-performance-api",
+          entry: performanceEntry
+        };
+      } catch (error) {
+        console.warn("Flow Helper: Background network download failed, falling back to fetch/blob", error);
+        const fetchResult = await downloadImageViaFetchBlob(performanceEntry.url);
+        await delay(1000);
+        return {
+          ...fetchResult,
+          method: fetchResult.method === "network-fetch-deduped" ? "network-fetch-deduped" : "network-performance-fetch-fallback",
+          entry: performanceEntry
+        };
+      }
+    }
+
+    throw new Error(response?.error || "No network image request found");
+  }
+
   async function waitForCondition(predicate, options = {}) {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 15000;
     const intervalMs = Number.isFinite(options.intervalMs) ? options.intervalMs : 400;
@@ -947,18 +1242,20 @@
     };
 
     const downloadUrl = findDownloadUrl(downloadButton);
+    const activationTarget = getDownloadActivationTarget(downloadButton);
+    const activationKey = getDownloadActivationKey(activationTarget, downloadUrl);
+
+    if (!markDownloadActivation(activationKey)) {
+      await delay(500);
+      return;
+    }
     
     if (downloadUrl) {
       console.log("Flow Helper: Using background download API for:", downloadUrl);
       
-      const response = await new Promise((resolve) => {
-        chrome.runtime.sendMessage({ type: "FLOW_HELPER_DOWNLOAD", url: downloadUrl }, (res) => {
-          if (chrome.runtime.lastError) {
-            resolve({ ok: false, error: chrome.runtime.lastError.message });
-          } else {
-            resolve(res);
-          }
-        });
+      const response = await sendRuntimeMessage({
+        type: "FLOW_HELPER_DOWNLOAD",
+        url: downloadUrl
       });
 
       if (response && response.ok) {
@@ -969,53 +1266,9 @@
       console.warn("Flow Helper: Background download failed, trying click fallback", response?.error);
     }
 
-    // --- Strategy 2: Comprehensive clicking approaches ---
-    console.log("Flow Helper: Using comprehensive click approaches");
-    
-    // Approach 2a: Try to trigger any associated form submission
-    const form = downloadButton.closest('form');
-    if (form) {
-      console.log("Flow Helper: Trying form submission");
-      try {
-        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-        await delay(500);
-      } catch (error) {
-        console.warn("Flow Helper: Form submission failed:", error);
-      }
-    }
-    
-    // Approach 2b: Look for and click any nested anchor tags
-    const nestedAnchor = downloadButton.querySelector('a') || downloadButton.closest('a');
-    if (nestedAnchor) {
-      console.log("Flow Helper: Clicking nested anchor");
-      clickElement(nestedAnchor);
-      await delay(500);
-    }
-    
-    // Approach 2c: Main button click with comprehensive events
-    console.log("Flow Helper: Clicking main download button");
-    clickElement(downloadButton);
-    
-    // Approach 2d: Try to find and trigger any onclick handlers
-    try {
-      if (downloadButton.onclick) {
-        console.log("Flow Helper: Triggering onclick handler");
-        downloadButton.onclick.call(downloadButton, new MouseEvent('click'));
-      }
-    } catch (error) {
-      console.warn("Flow Helper: onclick handler failed:", error);
-    }
-    
-    // Approach 2e: Check for React/Vue event handlers and trigger them
-    try {
-      const reactKey = Object.keys(downloadButton).find(key => key.startsWith('__reactInternalInstance'));
-      if (reactKey) {
-        console.log("Flow Helper: Found React component, triggering events");
-        downloadButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-      }
-    } catch (error) {
-      console.warn("Flow Helper: React event handling failed:", error);
-    }
+    // Fallback: use exactly one activation target to avoid duplicate browser downloads.
+    console.log("Flow Helper: Activating download target once");
+    activateDownloadTargetOnce(activationTarget);
 
     await delay(3000);
   }
@@ -1069,6 +1322,9 @@
     fillPromptAndSubmit,
     waitForGenerationToFinish,
     clickDownload,
+    resetNetworkCapture,
+    waitForNetworkImage,
+    downloadLatestNetworkImage,
     openDeleteDialog,
     confirmDelete
   };

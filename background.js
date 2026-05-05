@@ -3,6 +3,11 @@ let downloadQueue = [];
 let activeDownloads = [];
 let processingQueue = false;
 const MAX_CONCURRENT_DOWNLOADS = 3;
+const DOWNLOAD_DEDUPE_WINDOW_MS = 10000;
+const recentDownloadRequests = new Map();
+const MAX_NETWORK_IMAGES_PER_TAB = 25;
+const FLOW_CONTENT_IMAGE_URL_PATTERN = "https://flow-content.google/image/*";
+const networkImageRequestsByTab = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log("Google Labs Flow Helper installed");
@@ -61,10 +66,174 @@ function processDownloadQueue() {
   });
 }
 
+function normalizeDownloadUrl(url) {
+  return String(url || "").trim();
+}
+
+function pruneRecentDownloadRequests(now = Date.now()) {
+  for (const [url, timestamp] of recentDownloadRequests.entries()) {
+    if (now - timestamp > DOWNLOAD_DEDUPE_WINDOW_MS) {
+      recentDownloadRequests.delete(url);
+    }
+  }
+}
+
+function isRecentDownloadRequest(url) {
+  const now = Date.now();
+  pruneRecentDownloadRequests(now);
+
+  const previousTimestamp = recentDownloadRequests.get(url);
+  if (previousTimestamp && now - previousTimestamp < DOWNLOAD_DEDUPE_WINDOW_MS) {
+    return true;
+  }
+
+  recentDownloadRequests.set(url, now);
+  return false;
+}
+
+function hasQueuedOrActiveDownload(url) {
+  return (
+    downloadQueue.some(item => item.url === url) ||
+    activeDownloads.some(item => item.originalUrl === url)
+  );
+}
+
 function queueDownload(url) {
+  if (hasQueuedOrActiveDownload(url)) {
+    console.log(`Flow Helper: Ignored duplicate queued/active download for ${url}`);
+    return false;
+  }
+
   downloadQueue.push({ url, timestamp: Date.now() });
   processDownloadQueue();
   console.log(`Flow Helper: Queued download for ${url}`);
+  return true;
+}
+
+function startQueuedDownload(url) {
+  const downloadUrl = normalizeDownloadUrl(url);
+
+  if (!downloadUrl) {
+    return { ok: false, error: "No URL provided" };
+  }
+
+  if (isRecentDownloadRequest(downloadUrl)) {
+    console.log("Flow Helper: Ignored recent duplicate download request");
+    return { ok: true, method: "deduped", url: downloadUrl };
+  }
+
+  const queued = queueDownload(downloadUrl);
+  return { ok: true, method: queued ? "queued" : "deduped", url: downloadUrl };
+}
+
+function isFlowContentImageUrl(url) {
+  try {
+    const parsedUrl = new URL(url);
+    return parsedUrl.hostname === "flow-content.google" && parsedUrl.pathname.startsWith("/image/");
+  } catch (_error) {
+    return false;
+  }
+}
+
+function getResponseHeader(headers, name) {
+  const targetName = name.toLowerCase();
+  const match = Array.isArray(headers)
+    ? headers.find(header => String(header.name || "").toLowerCase() === targetName)
+    : null;
+
+  return match?.value || "";
+}
+
+function recordNetworkImageRequest(details, phase = "completed") {
+  if (!details || details.tabId < 0 || !isFlowContentImageUrl(details.url)) {
+    return;
+  }
+
+  if (details.statusCode && (details.statusCode < 200 || details.statusCode >= 300)) {
+    return;
+  }
+
+  const contentType = getResponseHeader(details.responseHeaders, "content-type").toLowerCase();
+
+  if (contentType && !contentType.startsWith("image/")) {
+    return;
+  }
+
+  const entry = {
+    url: details.url,
+    tabId: details.tabId,
+    requestId: details.requestId,
+    statusCode: details.statusCode || 0,
+    contentType,
+    fromCache: Boolean(details.fromCache),
+    phase,
+    timestamp: Date.now()
+  };
+
+  const entries = networkImageRequestsByTab.get(details.tabId) || [];
+  const existingIndex = entries.findIndex(item => item.url === entry.url);
+
+  if (existingIndex >= 0) {
+    const previousEntry = entries.splice(existingIndex, 1)[0];
+    entry.timestamp = previousEntry.timestamp || entry.timestamp;
+    entry.phase = phase;
+  }
+
+  entries.push(entry);
+  networkImageRequestsByTab.set(details.tabId, entries.slice(-MAX_NETWORK_IMAGES_PER_TAB));
+  console.log("Flow Helper: Captured network image", {
+    tabId: entry.tabId,
+    statusCode: entry.statusCode,
+    contentType: entry.contentType,
+    fromCache: entry.fromCache,
+    phase: entry.phase,
+    url: entry.url
+  });
+}
+
+function resetNetworkImageCapture(tabId) {
+  networkImageRequestsByTab.set(tabId, []);
+  return Date.now();
+}
+
+function getLatestNetworkImage(tabId, after = 0) {
+  const entries = networkImageRequestsByTab.get(tabId) || [];
+  const afterTimestamp = Number.isFinite(after) ? after : 0;
+
+  return entries
+    .filter(entry => entry.timestamp >= afterTimestamp)
+    .sort((left, right) => right.timestamp - left.timestamp)[0] || null;
+}
+
+function registerNetworkImageCapture() {
+  if (!chrome.webRequest?.onBeforeRequest || !chrome.webRequest?.onCompleted) {
+    console.warn("Flow Helper: webRequest API is not available");
+    return;
+  }
+
+  const filter = {
+    urls: [FLOW_CONTENT_IMAGE_URL_PATTERN],
+    types: ["image", "xmlhttprequest", "other"]
+  };
+
+  chrome.webRequest.onBeforeRequest.addListener(
+    details => recordNetworkImageRequest(details, "started"),
+    filter
+  );
+
+  try {
+    chrome.webRequest.onCompleted.addListener(
+      details => recordNetworkImageRequest(details, "completed"),
+      filter,
+      ["responseHeaders"]
+    );
+  } catch (error) {
+    console.warn("Flow Helper: Falling back to webRequest without response headers", error);
+    chrome.webRequest.onCompleted.addListener(
+      details => recordNetworkImageRequest(details, "completed"),
+      filter
+    );
+  }
 }
 
 async function setupOffscreen() {
@@ -137,37 +306,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
-  if (message?.type === "FLOW_HELPER_DOWNLOAD") {
-    console.log("Flow Helper: Received download request for:", message.url);
-    
-    // Validate URL
-    if (!message.url) {
-      console.error("Flow Helper: No URL provided for download");
-      sendResponse({ ok: false, error: "No URL provided" });
+  if (message?.type === "FLOW_HELPER_NETWORK_CAPTURE_RESET") {
+    if (!sender?.tab?.id) {
+      sendResponse({ ok: false, error: "No sender tab found" });
       return true;
     }
-    
-    // Try queue-based download first
-    try {
-      queueDownload(message.url);
-      sendResponse({ ok: true, method: 'queued' });
-    } catch (error) {
-      console.error("Flow Helper: Queue download failed:", error);
-      
-      // Fallback to direct download
-      chrome.downloads.download({
-        url: message.url,
-        saveAs: false
-      }).then((downloadId) => {
-        console.log("Flow Helper: Direct download started:", downloadId);
-        sendResponse({ ok: true, downloadId, method: 'direct' });
-      }).catch((downloadError) => {
-        console.error("Flow Helper: Direct download failed:", downloadError);
-        sendResponse({ ok: false, error: downloadError.message });
-      });
-    }
+
+    const timestamp = resetNetworkImageCapture(sender.tab.id);
+    sendResponse({ ok: true, timestamp });
     return true;
   }
+
+  if (message?.type === "FLOW_HELPER_GET_LATEST_NETWORK_IMAGE") {
+    if (!sender?.tab?.id) {
+      sendResponse({ ok: false, error: "No sender tab found" });
+      return true;
+    }
+
+    const entry = getLatestNetworkImage(sender.tab.id, Number(message.after) || 0);
+    sendResponse({
+      ok: Boolean(entry),
+      entry,
+      error: entry ? "" : "No captured network image request found"
+    });
+    return true;
+  }
+
+  if (message?.type === "FLOW_HELPER_DOWNLOAD_LATEST_NETWORK_IMAGE") {
+    if (!sender?.tab?.id) {
+      sendResponse({ ok: false, error: "No sender tab found" });
+      return true;
+    }
+
+    const entry = getLatestNetworkImage(sender.tab.id, Number(message.after) || 0);
+
+    if (!entry) {
+      sendResponse({ ok: false, error: "No captured network image request found" });
+      return true;
+    }
+
+    const result = startQueuedDownload(entry.url);
+    sendResponse({
+      ...result,
+      method: result.ok ? (result.method === "deduped" ? "deduped" : "network") : result.method,
+      entry
+    });
+    return true;
+  }
+
+  if (message?.type === "FLOW_HELPER_DOWNLOAD") {
+    console.log("Flow Helper: Received download request for:", message.url);
+    sendResponse(startQueuedDownload(message.url));
+    return true;
+  }
+});
+
+registerNetworkImageCapture();
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  networkImageRequestsByTab.delete(tabId);
 });
 
 // Track download completion

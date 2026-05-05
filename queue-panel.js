@@ -7,6 +7,11 @@
   const STORAGE_KEY = "flowHelperQueueStateByProject";
   const RETRY_LIMIT = 3;
   const MAX_REFRESHES_PER_ITEM = 1;
+  const DEFAULT_DOWNLOAD_MODE = "network";
+  const DOWNLOAD_MODE_LABELS = {
+    network: "Network",
+    button: "Button"
+  };
   const STAGE_LABELS = {
     input: "Fill prompt",
     "wait-progress": "Wait for generation",
@@ -25,6 +30,7 @@
     pauseButton: null,
     clearDoneButton: null,
     clearAllButton: null,
+    downloadModeInputs: [],
     queueList: null,
     queueStatus: null,
     queueCount: null,
@@ -34,6 +40,7 @@
       queue: [],
       running: false,
       activeQueueItemId: null,
+      downloadMode: DEFAULT_DOWNLOAD_MODE,
       statusMessage: "Ready"
     },
     runtimeStatus: "Ready",
@@ -119,6 +126,7 @@
       queue: [],
       running: false,
       activeQueueItemId: null,
+      downloadMode: DEFAULT_DOWNLOAD_MODE,
       statusMessage: "Ready"
     };
   }
@@ -140,6 +148,7 @@
       stage: STAGE_LABELS[item?.stage] ? item.stage : "input",
       stageAttempts: Number.isFinite(item?.stageAttempts) ? item.stageAttempts : 0,
       refreshCount: Number.isFinite(item?.refreshCount) ? item.refreshCount : 0,
+      networkCaptureStartedAt: Number.isFinite(item?.networkCaptureStartedAt) ? item.networkCaptureStartedAt : 0,
       lastError: typeof item?.lastError === "string" ? item.lastError : "",
       createdAt: typeof item?.createdAt === "string" ? item.createdAt : now,
       updatedAt: typeof item?.updatedAt === "string" ? item.updatedAt : now
@@ -153,6 +162,9 @@
         .filter((item) => item.prompt && item.status !== "completed" && item.stage !== "completed")
       : [];
     const activeQueueItemId = typeof value?.activeQueueItemId === "string" ? value.activeQueueItemId : null;
+    const downloadMode = Object.prototype.hasOwnProperty.call(DOWNLOAD_MODE_LABELS, value?.downloadMode)
+      ? value.downloadMode
+      : DEFAULT_DOWNLOAD_MODE;
 
     return {
       queue,
@@ -160,6 +172,7 @@
       activeQueueItemId: queue.some((item) => item.id === activeQueueItemId && ["queued", "paused", "running"].includes(item.status))
         ? activeQueueItemId
         : null,
+      downloadMode,
       statusMessage: typeof value?.statusMessage === "string" && value.statusMessage ? value.statusMessage : "Ready"
     };
   }
@@ -193,6 +206,7 @@
       queue: state.queueState.queue.map((item) => ({ ...item })),
       running: state.queueState.running,
       activeQueueItemId: state.queueState.activeQueueItemId,
+      downloadMode: state.queueState.downloadMode,
       statusMessage: state.queueState.statusMessage,
       updatedAt: new Date().toISOString()
     };
@@ -214,6 +228,27 @@
     return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
   }
 
+  function getDownloadModeLabel(mode = state.queueState.downloadMode) {
+    return DOWNLOAD_MODE_LABELS[mode] || DOWNLOAD_MODE_LABELS[DEFAULT_DOWNLOAD_MODE];
+  }
+
+  async function setDownloadMode(nextMode) {
+    if (!Object.prototype.hasOwnProperty.call(DOWNLOAD_MODE_LABELS, nextMode)) {
+      return;
+    }
+
+    if (state.queueState.running) {
+      renderQueueUi();
+      return;
+    }
+
+    state.queueState.downloadMode = nextMode;
+    state.queueState.statusMessage = `Download mode: ${getDownloadModeLabel(nextMode)}`;
+    setRuntimeStatus(state.queueState.statusMessage);
+    await persistQueueState();
+    renderQueueUi();
+  }
+
   function buildQueueItem(prompt) {
     const now = new Date().toISOString();
 
@@ -224,6 +259,7 @@
       stage: "input",
       stageAttempts: 0,
       refreshCount: 0,
+      networkCaptureStartedAt: 0,
       lastError: "",
       createdAt: now,
       updatedAt: now
@@ -393,6 +429,10 @@
     state.pauseButton.disabled = !state.queueState.running;
     state.clearDoneButton.disabled = !state.queueState.queue.some((item) => item.status === "completed" || item.status === "error");
     state.clearAllButton.disabled = state.queueState.queue.length === 0;
+    state.downloadModeInputs.forEach((input) => {
+      input.checked = input.value === state.queueState.downloadMode;
+      input.disabled = state.queueState.running;
+    });
   }
 
   function bindUiEvents() {
@@ -421,6 +461,14 @@
 
     state.clearAllButton?.addEventListener("click", () => {
       void clearAllItems();
+    });
+
+    state.downloadModeInputs.forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          void setDownloadMode(input.value);
+        }
+      });
     });
 
     state.queueList?.addEventListener("click", (event) => {
@@ -477,6 +525,19 @@
           data-role="prompt-input"
           placeholder="Type a prompt here..."
         ></textarea>
+        <div class="flow-helper-mode-control">
+          <p class="flow-helper-label">Download mode</p>
+          <div class="flow-helper-segmented" role="radiogroup" aria-label="Download mode">
+            <label class="flow-helper-segmented__option">
+              <input type="radio" name="flow-helper-download-mode" value="network" data-role="download-mode">
+              <span>Network</span>
+            </label>
+            <label class="flow-helper-segmented__option">
+              <input type="radio" name="flow-helper-download-mode" value="button" data-role="download-mode">
+              <span>Button</span>
+            </label>
+          </div>
+        </div>
         <div class="flow-helper-button-row">
           <button type="button" class="flow-helper-button flow-helper-button--primary" data-action="enqueue">Add to queue</button>
           <button type="button" class="flow-helper-button" data-action="start">Start queue</button>
@@ -505,6 +566,8 @@
     state.pauseButton = state.body.querySelector('[data-action="pause"]');
     state.clearDoneButton = state.body.querySelector('[data-action="clear-done"]');
     state.clearAllButton = state.body.querySelector('[data-action="clear-all"]');
+    state.downloadModeInputs = Array.from(state.body.querySelectorAll('[data-role="download-mode"]'))
+      .filter((input) => input instanceof HTMLInputElement);
     state.queueList = state.body.querySelector('[data-role="queue-list"]');
     state.queueStatus = state.body.querySelector('[data-role="queue-status"]');
     state.queueCount = state.body.querySelector('[data-role="queue-count"]');
@@ -735,35 +798,59 @@
       try {
         if (queueItem.stage === "input") {
           setRuntimeStatus(`Submitting "${truncateText(queueItem.prompt)}"`);
+          if (state.queueState.downloadMode === "network") {
+            queueItem.networkCaptureStartedAt = await actions.resetNetworkCapture();
+            queueItem.updatedAt = new Date().toISOString();
+            await persistQueueState();
+          } else {
+            queueItem.networkCaptureStartedAt = 0;
+          }
           await actions.fillPromptAndSubmit(queueItem.prompt);
           await advanceStage(queueItem, "wait-progress", `Submitted "${truncateText(queueItem.prompt)}"`);
           continue;
         }
 
         if (queueItem.stage === "wait-progress") {
-          await actions.waitForGenerationToFinish({
-            check: assertQueueRunning,
-            onProgress: (progressText) => {
-              if (progressText === "waiting-start") {
-                setRuntimeStatus(`Waiting for generation to start for "${truncateText(queueItem.prompt)}"`);
-                return;
+          if (state.queueState.downloadMode === "network") {
+            await actions.waitForNetworkImage({
+              after: queueItem.networkCaptureStartedAt || 0,
+              check: assertQueueRunning,
+              onProgress: () => {
+                setRuntimeStatus(`Waiting for network image for "${truncateText(queueItem.prompt)}"`);
               }
+            });
+          } else {
+            await actions.waitForGenerationToFinish({
+              check: assertQueueRunning,
+              onProgress: (progressText) => {
+                if (progressText === "waiting-start") {
+                  setRuntimeStatus(`Waiting for generation to start for "${truncateText(queueItem.prompt)}"`);
+                  return;
+                }
 
-              if (progressText === "waiting-finish") {
-                setRuntimeStatus(`Waiting for generation to finish for "${truncateText(queueItem.prompt)}"`);
-                return;
+                if (progressText === "waiting-finish") {
+                  setRuntimeStatus(`Waiting for generation to finish for "${truncateText(queueItem.prompt)}"`);
+                  return;
+                }
+
+                setRuntimeStatus(`Generating ${progressText}`);
               }
-
-              setRuntimeStatus(`Generating ${progressText}`);
-            }
-          });
+            });
+          }
           await advanceStage(queueItem, "download", `Generation finished for "${truncateText(queueItem.prompt)}"`);
           continue;
         }
 
         if (queueItem.stage === "download") {
-          setRuntimeStatus(`Downloading "${truncateText(queueItem.prompt)}"`);
-          await actions.clickDownload();
+          const modeLabel = getDownloadModeLabel();
+          setRuntimeStatus(`Downloading via ${modeLabel} "${truncateText(queueItem.prompt)}"`);
+          if (state.queueState.downloadMode === "network") {
+            await actions.downloadLatestNetworkImage({
+              after: queueItem.networkCaptureStartedAt || 0
+            });
+          } else {
+            await actions.clickDownload();
+          }
           await advanceStage(queueItem, "delete-trigger", `Downloaded "${truncateText(queueItem.prompt)}"`);
           continue;
         }

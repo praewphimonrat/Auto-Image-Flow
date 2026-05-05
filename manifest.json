@@ -9,10 +9,12 @@
     "offscreen",
     "tabs",
     "downloads",
-    "alarms"
+    "alarms",
+    "webRequest"
   ],
   "host_permissions": [
-    "https://labs.google/fx/th/tools/flow/project/*"
+    "https://labs.google/fx/th/tools/flow/project/*",
+    "https://flow-content.google/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self';"
