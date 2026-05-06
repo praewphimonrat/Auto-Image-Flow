@@ -6,7 +6,6 @@
   const FLOW_HELPER_ROOT_ID = "autogen-flow-helper-root";
   const STORAGE_KEY = "flowHelperQueueStateByProject";
   const RETRY_LIMIT = 3;
-  const MAX_REFRESHES_PER_ITEM = 1;
   const DEFAULT_DOWNLOAD_MODE = "network";
   const DOWNLOAD_MODE_LABELS = {
     network: "Network",
@@ -16,8 +15,7 @@
     input: "Fill prompt",
     "wait-progress": "Wait for generation",
     download: "Download result",
-    "delete-trigger": "Open delete dialog",
-    "delete-confirm": "Confirm delete",
+    archive: "Archive result",
     completed: "Completed"
   };
 
@@ -52,7 +50,6 @@
   };
 
   class QueuePausedError extends Error {}
-  class QueueRefreshError extends Error {}
 
   function startSilentAudio() {
     if (state.silentAudio) {
@@ -140,14 +137,16 @@
   function normalizeQueueItem(item, index = 0) {
     const now = new Date().toISOString();
     const prompt = typeof item?.prompt === "string" ? item.prompt.trim() : "";
+    const stage = ["delete-trigger", "delete-confirm"].includes(item?.stage)
+      ? "archive"
+      : item?.stage;
 
     return {
       id: typeof item?.id === "string" && item.id ? item.id : `queue-${Date.now()}-${index}`,
       prompt,
       status: ["queued", "running", "paused", "completed", "error"].includes(item?.status) ? item.status : "queued",
-      stage: STAGE_LABELS[item?.stage] ? item.stage : "input",
+      stage: STAGE_LABELS[stage] ? stage : "input",
       stageAttempts: Number.isFinite(item?.stageAttempts) ? item.stageAttempts : 0,
-      refreshCount: Number.isFinite(item?.refreshCount) ? item.refreshCount : 0,
       networkCaptureStartedAt: Number.isFinite(item?.networkCaptureStartedAt) ? item.networkCaptureStartedAt : 0,
       lastError: typeof item?.lastError === "string" ? item.lastError : "",
       createdAt: typeof item?.createdAt === "string" ? item.createdAt : now,
@@ -258,7 +257,6 @@
       status: "queued",
       stage: "input",
       stageAttempts: 0,
-      refreshCount: 0,
       networkCaptureStartedAt: 0,
       lastError: "",
       createdAt: now,
@@ -389,7 +387,7 @@
 
     const stage = document.createElement("p");
     stage.className = "flow-helper-queue-item__stage";
-    stage.textContent = `Stage: ${STAGE_LABELS[queueItem.stage]} • Retry: ${queueItem.stageAttempts}/${RETRY_LIMIT} • Refresh: ${queueItem.refreshCount}/${MAX_REFRESHES_PER_ITEM}`;
+    stage.textContent = `Stage: ${STAGE_LABELS[queueItem.stage]} • Retry: ${queueItem.stageAttempts}/${RETRY_LIMIT}`;
 
     itemElement.append(topRow, prompt, stage);
 
@@ -513,7 +511,7 @@
 
     if (copy) {
       copy.textContent =
-        "Add prompts, start the queue, and the panel will submit, wait, download, delete, and recover from one refresh if a step gets stuck.";
+        "Add prompts, start the queue, and the panel will submit, wait, download, archive, and retry a stuck step without refreshing the page.";
     }
 
     state.body.innerHTML = `
@@ -710,7 +708,6 @@
     queueItem.status = "queued";
     queueItem.stage = "input";
     queueItem.stageAttempts = 0;
-    queueItem.refreshCount = 0;
     queueItem.lastError = "";
     queueItem.updatedAt = new Date().toISOString();
 
@@ -749,7 +746,7 @@
   }
 
   async function handleStageFailure(queueItem, error) {
-    if (error instanceof QueuePausedError || error instanceof QueueRefreshError) {
+    if (error instanceof QueuePausedError) {
       throw error;
     }
 
@@ -760,21 +757,9 @@
     setRuntimeStatus(state.queueState.statusMessage);
 
     if (queueItem.stageAttempts >= RETRY_LIMIT) {
-      if (queueItem.refreshCount < MAX_REFRESHES_PER_ITEM) {
-        queueItem.refreshCount += 1;
-        queueItem.stageAttempts = 0;
-        state.queueState.statusMessage = `${STAGE_LABELS[queueItem.stage]} failed ${RETRY_LIMIT} times. Refreshing page.`;
-        setRuntimeStatus(state.queueState.statusMessage);
-        await persistQueueState();
-        renderQueueUi();
-        await getActions().delay(250);
-        window.location.reload();
-        throw new QueueRefreshError("Refreshing page");
-      }
-
       queueItem.status = "error";
       state.queueState.activeQueueItemId = null;
-      state.queueState.statusMessage = `Stopped "${truncateText(queueItem.prompt)}" after retry and refresh`;
+      state.queueState.statusMessage = `Stopped "${truncateText(queueItem.prompt)}" after ${RETRY_LIMIT} failed attempts`;
       setRuntimeStatus(state.queueState.statusMessage);
     }
 
@@ -851,22 +836,13 @@
           } else {
             await actions.clickDownload();
           }
-          await advanceStage(queueItem, "delete-trigger", `Downloaded "${truncateText(queueItem.prompt)}"`);
+          await advanceStage(queueItem, "archive", `Downloaded "${truncateText(queueItem.prompt)}"`);
           continue;
         }
 
-        if (queueItem.stage === "delete-trigger") {
-          setRuntimeStatus(`Opening delete dialog for "${truncateText(queueItem.prompt)}"`);
-          await actions.openDeleteDialog({
-            check: assertQueueRunning
-          });
-          await advanceStage(queueItem, "delete-confirm", `Delete dialog opened for "${truncateText(queueItem.prompt)}"`);
-          continue;
-        }
-
-        if (queueItem.stage === "delete-confirm") {
-          setRuntimeStatus(`Deleting "${truncateText(queueItem.prompt)}"`);
-          await actions.confirmDelete({
+        if (queueItem.stage === "archive") {
+          setRuntimeStatus(`Archiving "${truncateText(queueItem.prompt)}"`);
+          await actions.archiveResult({
             check: assertQueueRunning
           });
           await completeQueueItem(queueItem);
@@ -919,7 +895,7 @@
         try {
           await processQueueItem(queueItem);
         } catch (error) {
-          if (error instanceof QueuePausedError || error instanceof QueueRefreshError) {
+          if (error instanceof QueuePausedError) {
             return;
           }
 

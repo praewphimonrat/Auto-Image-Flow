@@ -192,16 +192,14 @@
     return downloadButtons.length > 0 ? downloadButtons[0] : null;
   }
 
-  function findDeleteTriggerButton() {
+  function findArchiveButton(referenceElement = null) {
     return findButtonByMatcher((_button, buttonText, iconText) => {
-      return (buttonText.includes("ลบ") && iconText.includes("delete")) || iconText === "delete";
-    });
-  }
-
-  function findDeleteConfirmButton() {
-    return findButtonByMatcher((_button, buttonText, iconText) => {
-      return buttonText === "ลบ" && !iconText.includes("delete");
-    });
+      return (
+        iconText.includes("archive") ||
+        buttonText.includes("ที่เก็บถาวร") ||
+        buttonText.toLowerCase().includes("archive")
+      );
+    }, referenceElement);
   }
 
   function getVisibleProgressElements() {
@@ -1273,46 +1271,19 @@
     await delay(3000);
   }
 
-  async function openDeleteDialog(options = {}) {
+  async function archiveResult(options = {}) {
     const check = typeof options.check === "function" ? options.check : () => {};
+    const archiveButton = findArchiveButton(findDownloadButton());
 
-    if (findDeleteConfirmButton()) {
-      return;
+    check();
+
+    if (!archiveButton) {
+      throw new Error("Archive button not found");
     }
 
-    const deleteButton = findDeleteTriggerButton();
-
-    if (!deleteButton) {
-      throw new Error("Delete button not found");
-    }
-
-    clickElement(deleteButton);
-
-    await waitForCondition(() => Boolean(findDeleteConfirmButton()), {
-      timeoutMs: 8000,
-      intervalMs: 300,
-      timeoutMessage: "Delete confirmation did not appear",
-      check
-    });
-  }
-
-  async function confirmDelete(options = {}) {
-    const check = typeof options.check === "function" ? options.check : () => {};
-    const confirmButton = findDeleteConfirmButton();
-
-    if (!confirmButton) {
-      throw new Error("Delete confirmation button not found");
-    }
-
-    clickElement(confirmButton);
-
-    await waitForCondition(() => !findDeleteConfirmButton(), {
-      timeoutMs: 10000,
-      intervalMs: 350,
-      stableMs: 500,
-      timeoutMessage: "Delete confirmation did not close",
-      check
-    });
+    clickElement(archiveButton);
+    await delay(1500);
+    check();
   }
 
   window.FlowHelperPageActions = {
@@ -1325,7 +1296,6 @@
     resetNetworkCapture,
     waitForNetworkImage,
     downloadLatestNetworkImage,
-    openDeleteDialog,
-    confirmDelete
+    archiveResult
   };
 })();
