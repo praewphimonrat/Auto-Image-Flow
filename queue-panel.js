@@ -113,6 +113,23 @@
     return window.FlowHelperPageActions;
   }
 
+  function getProjectInfo() {
+    const actions = getActions();
+
+    if (actions?.getProjectInfo) {
+      return actions.getProjectInfo();
+    }
+
+    const segments = window.location.pathname.split("/").filter(Boolean);
+    const projectIndex = segments.lastIndexOf("project");
+    const projectId = projectIndex >= 0 ? segments[projectIndex + 1] || "unknown" : "unknown";
+
+    return {
+      href: window.location.href,
+      projectId
+    };
+  }
+
   async function waitForActions() {
     for (let attempt = 0; attempt < 80; attempt += 1) {
       const actions = getActions();
@@ -145,8 +162,7 @@
   }
 
   function getProjectKey() {
-    const actions = getActions();
-    const projectInfo = actions.getProjectInfo();
+    const projectInfo = getProjectInfo();
     return `${projectInfo.projectId}:${window.location.pathname}`;
   }
 
@@ -632,6 +648,13 @@
   }
 
   async function startQueue() {
+    const actions = await waitForActions();
+
+    if (!actions) {
+      setRuntimeStatus("Flow actions are still loading. Reload the extension and refresh this Flow tab.");
+      return;
+    }
+
     if (!state.queueState.queue.some((item) => ["queued", "paused", "running"].includes(item.status))) {
       setRuntimeStatus("No pending prompts to process.");
       return;
@@ -790,7 +813,11 @@
   }
 
   async function processQueueItem(queueItem) {
-    const actions = getActions();
+    const actions = await waitForActions();
+
+    if (!actions) {
+      throw new Error("Flow actions are not ready");
+    }
 
     queueItem.status = "running";
     queueItem.updatedAt = new Date().toISOString();
@@ -956,19 +983,12 @@
       return;
     }
 
-    const actions = await waitForActions();
-
-    if (!actions) {
-      console.warn("Flow Helper queue panel could not find page actions");
-      return;
-    }
-
-    await loadQueueState();
-
     if (!(await waitForPanelRoot())) {
       console.warn("Flow Helper queue panel could not find the docked panel root");
       return;
     }
+
+    await loadQueueState();
 
     state.booted = true;
     renderQueueUi();
@@ -981,7 +1001,17 @@
     });
 
     if (state.queueState.running) {
-      void processQueue();
+      void waitForActions().then((actions) => {
+        if (actions) {
+          void processQueue();
+          return;
+        }
+
+        state.queueState.running = false;
+        state.queueState.statusMessage = "Flow actions did not load. Reload the extension and refresh this Flow tab.";
+        setRuntimeStatus(state.queueState.statusMessage);
+        void persistQueueState().then(renderQueueUi);
+      });
     }
   }
 
