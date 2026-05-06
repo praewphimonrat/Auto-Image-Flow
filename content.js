@@ -304,23 +304,15 @@ function createPanel() {
         <div class="flow-helper-panel__inner" id="flow-helper-panel-inner">
           <header class="flow-helper-panel__header">
             <p class="flow-helper-panel__eyebrow">Google Labs Flow</p>
-            <h2 class="flow-helper-panel__title">Workspace Panel</h2>
+            <h2 class="flow-helper-panel__title">Prompt Queue</h2>
             <p class="flow-helper-panel__copy">
-              This panel stays on the right and the page is pushed left so the Flow interface is still visible beside it.
+              Loading queue controls...
             </p>
           </header>
           <div class="flow-helper-panel__body">
-            <div class="flow-helper-detail">
-              <span class="flow-helper-detail__label">Project</span>
-              <strong class="flow-helper-detail__value" data-role="project-id">unknown</strong>
-            </div>
-            <div class="flow-helper-detail">
-              <span class="flow-helper-detail__label">Page URL</span>
-              <span class="flow-helper-detail__value flow-helper-detail__value--muted" data-role="page-url"></span>
-            </div>
-            <div class="flow-helper-note">
-              Replace this placeholder with your real tools, actions, or project-specific controls.
-            </div>
+            <section class="flow-helper-section">
+              <p class="flow-helper-status">Preparing Flow Helper...</p>
+            </section>
           </div>
         </div>
       </section>
@@ -411,6 +403,7 @@ async function boot() {
     ...getProjectInfo(),
     isOpen: state.isOpen
   });
+  window.dispatchEvent(new Event("flow-helper-panel-ready"));
 }
 
 if (document.readyState === "loading") {

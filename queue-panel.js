@@ -113,6 +113,22 @@
     return window.FlowHelperPageActions;
   }
 
+  async function waitForActions() {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const actions = getActions();
+
+      if (actions?.delay && actions?.fillPromptAndSubmit) {
+        return actions;
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 150);
+      });
+    }
+
+    return null;
+  }
+
   function getPanelRoot() {
     const root = document.getElementById(FLOW_HELPER_ROOT_ID);
     return root instanceof HTMLElement ? root : null;
@@ -580,7 +596,9 @@
         return true;
       }
 
-      await getActions().delay(150);
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 150);
+      });
     }
 
     return false;
@@ -934,11 +952,16 @@
   }
 
   async function boot() {
-    if (state.booted || !getActions()) {
+    if (state.booted) {
       return;
     }
 
-    state.booted = true;
+    const actions = await waitForActions();
+
+    if (!actions) {
+      console.warn("Flow Helper queue panel could not find page actions");
+      return;
+    }
 
     await loadQueueState();
 
@@ -947,6 +970,7 @@
       return;
     }
 
+    state.booted = true;
     renderQueueUi();
 
     window.addEventListener("flow-helper-locationchange", () => {
@@ -972,6 +996,10 @@
   } else {
     void boot();
   }
+
+  window.addEventListener("flow-helper-panel-ready", () => {
+    void boot();
+  });
 
   window.FlowHelperQueuePanel = {
     boot
