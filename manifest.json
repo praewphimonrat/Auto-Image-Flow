@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Google Labs Flow Helper",
-  "description": "Empty scaffold for a Chrome extension that runs on Google Labs Flow project pages.",
+  "description": "Queue prompts, submit, download, and archive Google Labs Flow generations.",
   "version": "0.1.0",
   "permissions": [
     "storage",
@@ -10,7 +10,9 @@
     "tabs",
     "downloads",
     "alarms",
-    "webRequest"
+    "webRequest",
+    "scripting",
+    "debugger"
   ],
   "host_permissions": [
     "https://labs.google/fx/th/tools/flow/project/*",

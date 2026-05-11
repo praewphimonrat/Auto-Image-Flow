@@ -12,11 +12,11 @@
     button: "Button"
   };
   const STAGE_LABELS = {
-    input: "Fill prompt",
-    "wait-progress": "Wait for generation",
-    download: "Download result",
-    archive: "Archive result",
-    completed: "Completed"
+    input: "รอส่ง prompt",
+    "wait-progress": "กำลังโหลด",
+    download: "กำลังดาวน์โหลด",
+    archive: "กำลังจัดเก็บ",
+    completed: "โหลดเสร็จ"
   };
 
   const state = {
@@ -46,10 +46,84 @@
     isProcessing: false,
     booted: false,
     heartbeatInterval: null,
-    silentAudio: null
+    silentAudio: null,
+    contextInvalidated: false
   };
 
   class QueuePausedError extends Error {}
+
+  function isExtensionContextValid() {
+    try {
+      return Boolean(chrome?.runtime?.id);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function isContextInvalidatedError(error) {
+    const message = String(error?.message || error || "");
+    return message.includes("Extension context invalidated") ||
+      message.includes("Extension context was invalidated");
+  }
+
+  function handleContextInvalidated() {
+    if (state.contextInvalidated) {
+      return;
+    }
+    state.contextInvalidated = true;
+
+    if (state.heartbeatInterval) {
+      window.clearInterval(state.heartbeatInterval);
+      state.heartbeatInterval = null;
+    }
+
+    if (state.silentAudio) {
+      try {
+        state.silentAudio.pause();
+      } catch (_error) {}
+      state.silentAudio = null;
+    }
+
+    state.queueState.running = false;
+    state.isProcessing = false;
+    state.runtimeStatus = "Extension was reloaded. Refresh this Flow tab to reconnect.";
+
+    if (state.queueStatus) {
+      state.queueStatus.textContent = state.runtimeStatus;
+    }
+
+    // info, not warn — context invalidation is expected after the user
+    // reloads the extension and chrome://extensions surfaces console.warn
+    // from content scripts as a red entry in the Errors panel.
+    console.info("Flow Helper: extension context invalidated. Refresh the Flow tab to reconnect.");
+  }
+
+  function safeSendMessage(message) {
+    if (!isExtensionContextValid()) {
+      handleContextInvalidated();
+      return Promise.resolve(null);
+    }
+
+    try {
+      const result = chrome.runtime.sendMessage(message);
+
+      if (result && typeof result.then === "function") {
+        return result.catch((error) => {
+          if (isContextInvalidatedError(error)) {
+            handleContextInvalidated();
+          }
+          return null;
+        });
+      }
+
+      return Promise.resolve(result ?? null);
+    } catch (error) {
+      if (isContextInvalidatedError(error)) {
+        handleContextInvalidated();
+      }
+      return Promise.resolve(null);
+    }
+  }
 
   function startSilentAudio() {
     if (state.silentAudio) {
@@ -57,14 +131,14 @@
     }
 
     try {
-      const SILENT_AUDIO = "data:audio/wav;base64,UklGRigAAABXQVZFRm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==";
+      const SILENT_AUDIO = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==";
       state.silentAudio = new Audio(SILENT_AUDIO);
       state.silentAudio.loop = true;
       state.silentAudio.volume = 0; // Completely silent
       state.silentAudio.play().then(() => {
         console.log("Flow Helper: Tab silent audio started");
       }).catch((error) => {
-        console.log("Flow Helper: Tab silent audio blocked (expected):", error.message);
+        console.debug("Flow Helper: Tab silent audio blocked (expected):", error.message);
         // Expected - browser blocks autoplay without user interaction
       });
     } catch (error) {
@@ -80,22 +154,27 @@
   }
 
   function startHeartbeat() {
-    if (state.heartbeatInterval) {
+    if (state.heartbeatInterval || state.contextInvalidated) {
+      return;
+    }
+
+    if (!isExtensionContextValid()) {
+      handleContextInvalidated();
       return;
     }
 
     // Start offscreen document via background script
-    chrome.runtime.sendMessage({ type: "FLOW_HELPER_OFFSCREEN_START" }).catch(() => {});
+    void safeSendMessage({ type: "FLOW_HELPER_OFFSCREEN_START" });
 
     // Start silent audio in the current tab to prevent throttling
     startSilentAudio();
 
     state.heartbeatInterval = window.setInterval(() => {
-      chrome.runtime.sendMessage({
-        type: "FLOW_HELPER_PING"
-      }).catch(() => {
-        // Ignore errors if extension context is invalidated
-      });
+      if (!isExtensionContextValid()) {
+        handleContextInvalidated();
+        return;
+      }
+      void safeSendMessage({ type: "FLOW_HELPER_PING" });
     }, 15000);
   }
 
@@ -106,7 +185,11 @@
     }
 
     stopSilentAudio();
-    chrome.runtime.sendMessage({ type: "FLOW_HELPER_OFFSCREEN_STOP" }).catch(() => {});
+
+    if (state.contextInvalidated) {
+      return;
+    }
+    void safeSendMessage({ type: "FLOW_HELPER_OFFSCREEN_STOP" });
   }
 
   function getActions() {
@@ -210,17 +293,55 @@
 
   function storageGet(keys) {
     return new Promise((resolve) => {
-      chrome.storage.local.get(keys, (result) => {
-        resolve(chrome.runtime.lastError ? {} : result || {});
-      });
+      if (!isExtensionContextValid()) {
+        handleContextInvalidated();
+        resolve({});
+        return;
+      }
+
+      try {
+        chrome.storage.local.get(keys, (result) => {
+          const lastError = chrome.runtime?.lastError;
+          if (lastError) {
+            if (isContextInvalidatedError(lastError)) {
+              handleContextInvalidated();
+            }
+            resolve({});
+            return;
+          }
+          resolve(result || {});
+        });
+      } catch (error) {
+        if (isContextInvalidatedError(error)) {
+          handleContextInvalidated();
+        }
+        resolve({});
+      }
     });
   }
 
   function storageSet(value) {
     return new Promise((resolve) => {
-      chrome.storage.local.set(value, () => {
+      if (!isExtensionContextValid()) {
+        handleContextInvalidated();
         resolve();
-      });
+        return;
+      }
+
+      try {
+        chrome.storage.local.set(value, () => {
+          const lastError = chrome.runtime?.lastError;
+          if (lastError && isContextInvalidatedError(lastError)) {
+            handleContextInvalidated();
+          }
+          resolve();
+        });
+      } catch (error) {
+        if (isContextInvalidatedError(error)) {
+          handleContextInvalidated();
+        }
+        resolve();
+      }
     });
   }
 
@@ -779,8 +900,8 @@
     state.queueState.queue = state.queueState.queue.filter((item) => item.id !== queueItem.id);
     state.queueState.activeQueueItemId = null;
     state.queueState.statusMessage = state.queueState.queue.length
-      ? `Completed "${completedPrompt}" and cleared it from the queue`
-      : `Completed "${completedPrompt}" and cleared the queue`;
+      ? `โหลดเสร็จ: "${completedPrompt}"`
+      : "โหลดเสร็จ";
     setRuntimeStatus(state.queueState.statusMessage);
     await persistQueueState();
     renderQueueUi();
@@ -827,7 +948,7 @@
     while (state.queueState.running) {
       try {
         if (queueItem.stage === "input") {
-          setRuntimeStatus(`Submitting "${truncateText(queueItem.prompt)}"`);
+          setRuntimeStatus("กำลังส่ง prompt...");
           if (state.queueState.downloadMode === "network") {
             queueItem.networkCaptureStartedAt = await actions.resetNetworkCapture();
             queueItem.updatedAt = new Date().toISOString();
@@ -836,7 +957,7 @@
             queueItem.networkCaptureStartedAt = 0;
           }
           await actions.fillPromptAndSubmit(queueItem.prompt);
-          await advanceStage(queueItem, "wait-progress", `Submitted "${truncateText(queueItem.prompt)}"`);
+          await advanceStage(queueItem, "wait-progress", "ส่ง prompt สำเร็จ");
           continue;
         }
 
@@ -846,7 +967,7 @@
               after: queueItem.networkCaptureStartedAt || 0,
               check: assertQueueRunning,
               onProgress: () => {
-                setRuntimeStatus(`Waiting for network image for "${truncateText(queueItem.prompt)}"`);
+                setRuntimeStatus("กำลังโหลด...");
               }
             });
           } else {
@@ -854,26 +975,25 @@
               check: assertQueueRunning,
               onProgress: (progressText) => {
                 if (progressText === "waiting-start") {
-                  setRuntimeStatus(`Waiting for generation to start for "${truncateText(queueItem.prompt)}"`);
+                  setRuntimeStatus("กำลังโหลด...");
                   return;
                 }
 
                 if (progressText === "waiting-finish") {
-                  setRuntimeStatus(`Waiting for generation to finish for "${truncateText(queueItem.prompt)}"`);
+                  setRuntimeStatus("กำลังโหลด...");
                   return;
                 }
 
-                setRuntimeStatus(`Generating ${progressText}`);
+                setRuntimeStatus("กำลังโหลด...");
               }
             });
           }
-          await advanceStage(queueItem, "download", `Generation finished for "${truncateText(queueItem.prompt)}"`);
+          await advanceStage(queueItem, "download", "โหลดเสร็จ");
           continue;
         }
 
         if (queueItem.stage === "download") {
-          const modeLabel = getDownloadModeLabel();
-          setRuntimeStatus(`Downloading via ${modeLabel} "${truncateText(queueItem.prompt)}"`);
+          setRuntimeStatus("กำลังดาวน์โหลด...");
           if (state.queueState.downloadMode === "network") {
             await actions.downloadLatestNetworkImage({
               after: queueItem.networkCaptureStartedAt || 0
@@ -881,12 +1001,12 @@
           } else {
             await actions.clickDownload();
           }
-          await advanceStage(queueItem, "archive", `Downloaded "${truncateText(queueItem.prompt)}"`);
+          await advanceStage(queueItem, "archive", "โหลดเสร็จ");
           continue;
         }
 
         if (queueItem.stage === "archive") {
-          setRuntimeStatus(`Archiving "${truncateText(queueItem.prompt)}"`);
+          setRuntimeStatus("กำลังจัดเก็บ...");
           await actions.archiveResult({
             check: assertQueueRunning
           });
@@ -930,8 +1050,8 @@
         if (!queueItem) {
           state.queueState.running = false;
           state.queueState.activeQueueItemId = null;
-          state.queueState.statusMessage = "Queue completed";
-          setRuntimeStatus("Queue completed");
+          state.queueState.statusMessage = "โหลดเสร็จ";
+          setRuntimeStatus("โหลดเสร็จ");
           await persistQueueState();
           renderQueueUi();
           return;

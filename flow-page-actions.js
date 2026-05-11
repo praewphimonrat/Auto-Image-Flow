@@ -48,8 +48,23 @@
   }
 
   function isBackgroundTab() {
-    // True when the tab is not the active/focused tab
-    return document.visibilityState === "hidden" || window.__flowHelperVisibilitySpoofed === true;
+    // The visibility spoofer overrides document.visibilityState to "visible"
+    // even when the tab is actually in the background, so we cannot rely on
+    // that API. Instead, probe a known-visible element: if its rect is all
+    // zeros the tab is truly hidden by the browser compositor.
+    try {
+      const probe = document.documentElement;
+      if (probe) {
+        const rect = probe.getBoundingClientRect();
+        // In a real foreground tab, documentElement always has a non-zero rect
+        if (rect.width > 0 && rect.height > 0) {
+          return false;
+        }
+      }
+    } catch (_error) {
+      // Fall through to true — safer to assume background.
+    }
+    return true;
   }
 
   function isVisible(element) {
@@ -150,14 +165,27 @@
 
   function findButtonByMatcher(matcher, referenceElement = null, options = {}) {
     const matches = getButtonsByMatcher(matcher);
-    const candidates = options.includeDisabled ? matches : matches.filter((button) => !isButtonDisabled(button));
+    const enabledMatches = matches.filter((button) => !isButtonDisabled(button));
+    const candidates = options.includeDisabled
+      ? (enabledMatches.length ? enabledMatches : matches)
+      : enabledMatches;
 
     return getNearestElement(candidates.length ? candidates : matches, referenceElement);
   }
 
   function findSendButton(referenceElement = null) {
-    return findButtonByMatcher((_button, buttonText, iconText) => {
-      return iconText.includes("arrow_forward") || buttonText === "สร้าง" || buttonText.endsWith(" สร้าง");
+    return findButtonByMatcher((button, _buttonText, iconText) => {
+      // Exclude popup / dialog triggers. Flow has another button with the
+      // same hidden label "สร้าง" but icon "add_2" and aria-haspopup="dialog"
+      // — that opens the asset picker, NOT submit. Never click it here.
+      if (button.getAttribute("aria-haspopup")) {
+        return false;
+      }
+
+      // The submit button is uniquely identified by the icon "arrow_forward".
+      // The hidden a11y label "สร้าง" alone is shared with the asset-picker
+      // dialog button, so don't match on label alone.
+      return iconText.includes("arrow_forward");
     }, referenceElement, {
       includeDisabled: true
     });
@@ -166,6 +194,11 @@
   function findDownloadButton() {
     // ค้นหาปุ่มดาวน์โหลดที่เฉพาะเจาะจงสำหรับ Google Labs Flow
     const downloadButtons = getButtonsByMatcher((button, buttonText, iconText) => {
+      // ห้ามจับปุ่มที่เปิด dialog เช่น ปุ่ม "สร้าง" (add_2) ที่เป็น asset picker
+      if (button.getAttribute("aria-haspopup")) {
+        return false;
+      }
+
       // ตรวจสอบ icon ที่มี "download" 
       const hasDownloadIcon = iconText.includes("download");
       
@@ -193,7 +226,12 @@
   }
 
   function findArchiveButton(referenceElement = null) {
-    return findButtonByMatcher((_button, buttonText, iconText) => {
+    return findButtonByMatcher((button, buttonText, iconText) => {
+      // ห้ามจับปุ่มที่เปิด dialog เช่น ปุ่ม "สร้าง" (add_2) ที่เป็น asset picker
+      if (button.getAttribute("aria-haspopup")) {
+        return false;
+      }
+
       return (
         iconText.includes("archive") ||
         buttonText.includes("ที่เก็บถาวร") ||
@@ -219,25 +257,78 @@
     });
   }
 
+  function getEditorPlaceholderText(editor) {
+    if (!(editor instanceof HTMLElement)) {
+      return "";
+    }
+
+    const placeholder = editor.querySelector('[data-slate-placeholder="true"]');
+    return placeholder ? normalizeText(placeholder.textContent) : "";
+  }
+
+  // Google Labs Flow has multiple Slate editors on the same page (prompt
+  // input, scene description, etc.). The prompt input is identified by a
+  // placeholder like "คุณต้องการสร้างอะไร" / "What do you want to create".
+  function isPromptEditorPlaceholder(text) {
+    if (!text) {
+      return false;
+    }
+
+    const lowered = text.toLowerCase();
+    return (
+      text.includes("คุณต้องการ") ||
+      text.includes("ต้องการสร้าง") ||
+      lowered.includes("what do you want") ||
+      lowered.includes("describe what") ||
+      lowered.includes("create something")
+    );
+  }
+
+  function pickPromptEditor(editors, sendButton) {
+    if (!editors.length) {
+      return null;
+    }
+
+    const byPlaceholder = editors.find((editor) =>
+      isPromptEditorPlaceholder(getEditorPlaceholderText(editor))
+    );
+
+    if (byPlaceholder) {
+      return byPlaceholder;
+    }
+
+    return getNearestElement(editors, sendButton);
+  }
+
   function findPromptEditor() {
     const sendButton = findSendButton();
+
     const slateEditors = Array.from(
       document.querySelectorAll('div[role="textbox"][data-slate-editor="true"][data-slate-node="value"][contenteditable="true"]')
     ).filter((element) => {
       return element instanceof HTMLElement && isVisible(element) && !element.closest(`#${FLOW_HELPER_ROOT_ID}`);
     });
 
-    if (slateEditors.length) {
-      return getNearestElement(slateEditors, sendButton);
+    const editorByPlaceholder = pickPromptEditor(slateEditors, sendButton);
+    if (editorByPlaceholder) {
+      return editorByPlaceholder;
     }
 
-    const slateParagraph = Array.from(document.querySelectorAll('p[data-slate-node="element"]')).filter((element) => {
+    const slateParagraphs = Array.from(document.querySelectorAll('p[data-slate-node="element"]')).filter((element) => {
       return element instanceof HTMLParagraphElement && isVisible(element) && !element.closest(`#${FLOW_HELPER_ROOT_ID}`);
     });
 
-    if (slateParagraph.length) {
+    if (slateParagraphs.length) {
+      const paragraphByPlaceholder = slateParagraphs.find((paragraph) =>
+        isPromptEditorPlaceholder(getEditorPlaceholderText(paragraph))
+      );
+
+      if (paragraphByPlaceholder) {
+        return paragraphByPlaceholder.closest('[contenteditable="true"]') || paragraphByPlaceholder;
+      }
+
       return getNearestElement(
-        slateParagraph.map((element) => element.closest('[contenteditable="true"]') || element),
+        slateParagraphs.map((element) => element.closest('[contenteditable="true"]') || element),
         sendButton
       );
     }
@@ -279,16 +370,25 @@
   }
 
   function selectNodeContents(element) {
+    if (!(element instanceof Node) || !element.isConnected) {
+      return;
+    }
+
     const selection = window.getSelection();
 
     if (!selection) {
       return;
     }
 
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    selection.removeAllRanges();
-    selection.addRange(range);
+    // selectAllChildren is the modern equivalent of
+    // createRange + selectNodeContents + removeAllRanges + addRange,
+    // and it does NOT emit Blink's "addRange isn't in document" console
+    // warning when nodes detach mid-frame.
+    try {
+      selection.selectAllChildren(element);
+    } catch (_error) {
+      // Slate will reconcile its own selection on next focus.
+    }
   }
 
   function getSlateParagraph(editor) {
@@ -316,20 +416,16 @@
       };
     }
 
-    const zeroWidthNode = paragraph.querySelector('[data-slate-zero-width]');
-
-    if (zeroWidthNode?.firstChild instanceof Text) {
-      return {
-        node: zeroWidthNode.firstChild,
-        offset: Math.min(zeroWidthNode.firstChild.textContent?.length || 0, 1)
-      };
-    }
-
+    // Empty paragraph (Slate placeholder state). Do NOT anchor inside the
+    // [data-slate-zero-width] span — execCommand("insertText") would write
+    // text literally into that placeholder node, bypassing Slate's
+    // onBeforeInput pipeline. The caller falls back to a block-level caret
+    // so Slate can normalize and dispatch a real insertText op.
     return null;
   }
 
   function setSelectionToParagraph(paragraph) {
-    if (!(paragraph instanceof HTMLParagraphElement)) {
+    if (!(paragraph instanceof HTMLParagraphElement) || !paragraph.isConnected) {
       return;
     }
 
@@ -339,19 +435,33 @@
       return;
     }
 
-    const range = document.createRange();
-    const selectionTarget = getSlateSelectionTarget(paragraph);
+    // Use Selection.collapse() / setBaseAndExtent() instead of
+    // createRange + removeAllRanges + addRange. The legacy combo logs
+    // "addRange(): The given range isn't in document" from Blink's C++
+    // side when nodes detach mid-frame (Slate re-renders). That warning
+    // bypasses JS try/catch and surfaces in chrome://extensions Errors.
+    try {
+      const selectionTarget = getSlateSelectionTarget(paragraph);
+      const targetNode = selectionTarget?.node;
 
-    if (selectionTarget?.node instanceof Text) {
-      range.setStart(selectionTarget.node, selectionTarget.offset);
-      range.setEnd(selectionTarget.node, selectionTarget.offset);
-    } else {
-      range.selectNodeContents(paragraph);
-      range.collapse(false);
+      if (
+        targetNode instanceof Text &&
+        targetNode.isConnected &&
+        paragraph.contains(targetNode)
+      ) {
+        selection.setBaseAndExtent(
+          targetNode,
+          selectionTarget.offset,
+          targetNode,
+          selectionTarget.offset
+        );
+      } else if (paragraph.isConnected) {
+        selection.collapse(paragraph, 0);
+      }
+    } catch (_error) {
+      // Selection still failed; Slate will reconcile its own selection
+      // on its next focus event.
     }
-
-    selection.removeAllRanges();
-    selection.addRange(range);
   }
 
   function dispatchKeyboardEvent(element, eventName, options = {}) {
@@ -381,8 +491,15 @@
       block: "center",
       inline: "nearest"
     });
-    dispatchPointerSequence(editorRoot);
-    editorRoot.click?.();
+
+    // Click the paragraph itself, not the wrapper. Slate's React onClick
+    // handler on the paragraph picks up the focus + selection change in
+    // one go and aligns its internal selection with the DOM.
+    const clickTarget =
+      slateParagraph instanceof HTMLParagraphElement ? slateParagraph : editorRoot;
+
+    dispatchPointerSequence(clickTarget);
+    clickTarget.click?.();
     editorRoot.focus();
 
     if (slateParagraph instanceof HTMLParagraphElement) {
@@ -394,108 +511,124 @@
     announceSelectionChange();
   }
 
-  function ensureSlateTextContainers(paragraph) {
-    let textNode = paragraph.querySelector(':scope > span[data-slate-node="text"]');
-
-    if (!(textNode instanceof HTMLSpanElement)) {
-      textNode = document.createElement("span");
-      textNode.setAttribute("data-slate-node", "text");
-      paragraph.replaceChildren(textNode);
-    }
-
-    let leafNode = textNode.querySelector(':scope > span[data-slate-leaf="true"]');
-
-    if (!(leafNode instanceof HTMLSpanElement)) {
-      leafNode = document.createElement("span");
-      leafNode.setAttribute("data-slate-leaf", "true");
-      textNode.replaceChildren(leafNode);
-    }
-
-    return {
-      textNode,
-      leafNode
-    };
-  }
-
-  function buildSlateTextTree(prompt) {
-    const textNode = document.createElement("span");
-    textNode.setAttribute("data-slate-node", "text");
-
-    const leafNode = document.createElement("span");
-    leafNode.setAttribute("data-slate-leaf", "true");
-
-    const stringNode = document.createElement("span");
-    stringNode.setAttribute("data-slate-string", "true");
-    stringNode.textContent = prompt;
-
-    leafNode.appendChild(stringNode);
-    textNode.appendChild(leafNode);
-
-    return textNode;
-  }
-
-  function replaceSlateParagraphText(paragraph, prompt) {
-    if (!(paragraph instanceof HTMLParagraphElement)) {
-      return;
-    }
-
-    const { leafNode } = ensureSlateTextContainers(paragraph);
-    const stringNode = buildSlateTextTree(prompt).querySelector('[data-slate-string="true"]');
-
-    if (!(stringNode instanceof HTMLSpanElement)) {
-      return;
-    }
-
-    leafNode.replaceChildren(stringNode);
-  }
-
-  function clearEditorText(editorRoot, slateParagraph) {
-    activateEditorForTyping(editorRoot, slateParagraph);
-
-    if (slateParagraph instanceof HTMLParagraphElement) {
-      selectNodeContents(slateParagraph);
-      announceSelectionChange();
-    }
-
+  function selectAllInEditor(editorRoot) {
     try {
-      document.execCommand("delete", false);
-    } catch (error) {
-      console.warn("Flow Helper delete failed", error);
+      if (document.execCommand("selectAll", false)) {
+        return true;
+      }
+    } catch (_error) {
+      // Fall through to manual range selection below.
     }
 
-    if (slateParagraph instanceof HTMLParagraphElement) {
-      setSelectionToParagraph(slateParagraph);
+    if (editorRoot instanceof HTMLElement) {
+      selectNodeContents(editorRoot);
+      announceSelectionChange();
+      return true;
     }
 
-    announceSelectionChange();
+    return false;
+  }
+
+  function isPromptCommittedToSlateModel(editorRoot, prompt) {
+    if (!(editorRoot instanceof HTMLElement)) {
+      return false;
+    }
+
+    // Slate only renders [data-slate-string="true"] when the model has
+    // text. If the placeholder span is still attached, the model is empty
+    // even if some "text" leaked into the zero-width span.
+    const stringNode = editorRoot.querySelector('[data-slate-string="true"]');
+    if (!(stringNode instanceof HTMLElement)) {
+      return false;
+    }
+
+    const expected = normalizeText(prompt);
+    if (!expected) {
+      return false;
+    }
+
+    return normalizeText(stringNode.textContent || "") === expected;
   }
 
   function tryInsertTextWithExecCommand(editorRoot, slateParagraph, prompt) {
     try {
-      clearEditorText(editorRoot, slateParagraph);
+      activateEditorForTyping(editorRoot, slateParagraph);
+      selectAllInEditor(editorRoot);
+
+      // Run delete + insertText as two separate trusted beforeinput events
+      // so Slate observes the model going to length 0 before the insert.
+      try {
+        document.execCommand("delete", false);
+      } catch (_error) {}
+
       const inserted = document.execCommand("insertText", false, prompt);
       announceSelectionChange();
 
-      return Boolean(inserted) || getEditorText(editorRoot) === normalizeText(prompt);
+      return (
+        isPromptCommittedToSlateModel(editorRoot, prompt) ||
+        (Boolean(inserted) && getEditorText(editorRoot) === normalizeText(prompt))
+      );
     } catch (error) {
       console.warn("Flow Helper execCommand failed", error);
       return false;
     }
   }
 
+  // IME-style fallback: Slate's onCompositionEnd handler reads `data` and
+  // calls editor.insertText(data) via its internal transforms, regardless
+  // of beforeinput trusted-ness. With selectAll first, insertText replaces
+  // the entire selection — no need to execCommand("delete"), which mutates
+  // the DOM raw and crashes Slate's reconciler.
+  function tryInsertTextWithComposition(editorRoot, slateParagraph, prompt) {
+    try {
+      activateEditorForTyping(editorRoot, slateParagraph);
+      selectAllInEditor(editorRoot);
+
+      editorRoot.dispatchEvent(new CompositionEvent("compositionstart", {
+        bubbles: true,
+        cancelable: true,
+        data: ""
+      }));
+      editorRoot.dispatchEvent(new CompositionEvent("compositionupdate", {
+        bubbles: true,
+        cancelable: true,
+        data: prompt
+      }));
+      editorRoot.dispatchEvent(new CompositionEvent("compositionend", {
+        bubbles: true,
+        cancelable: true,
+        data: prompt
+      }));
+      editorRoot.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        cancelable: false,
+        inputType: "insertCompositionText",
+        data: prompt
+      }));
+      announceSelectionChange();
+
+      return isPromptCommittedToSlateModel(editorRoot, prompt);
+    } catch (error) {
+      console.warn("Flow Helper composition simulation failed", error);
+      return false;
+    }
+  }
+
   function tryInsertTextWithBeforeInput(editorRoot, slateParagraph, prompt) {
     try {
-      clearEditorText(editorRoot, slateParagraph);
+      activateEditorForTyping(editorRoot, slateParagraph);
+      selectAllInEditor(editorRoot);
+
       const beforeInputEvent = new InputEvent("beforeinput", {
         bubbles: true,
         cancelable: true,
-        inputType: "insertText",
+        inputType: "insertReplacementText",
         data: prompt
       });
       const inputEvent = new InputEvent("input", {
         bubbles: true,
         cancelable: false,
-        inputType: "insertText",
+        inputType: "insertReplacementText",
         data: prompt
       });
 
@@ -503,7 +636,7 @@
       editorRoot.dispatchEvent(inputEvent);
       announceSelectionChange();
 
-      return getEditorText(editorRoot) === normalizeText(prompt) || Boolean(findSendButton(editorRoot));
+      return getEditorText(editorRoot) === normalizeText(prompt);
     } catch (error) {
       console.warn("Flow Helper synthetic beforeinput failed", error);
       return false;
@@ -512,7 +645,9 @@
 
   function tryInsertTextWithPasteEvent(editorRoot, slateParagraph, prompt) {
     try {
-      clearEditorText(editorRoot, slateParagraph);
+      activateEditorForTyping(editorRoot, slateParagraph);
+      selectAllInEditor(editorRoot);
+
       dispatchKeyboardEvent(editorRoot, "keydown", {
         key: "v",
         code: "KeyV",
@@ -559,31 +694,6 @@
     }
   }
 
-  function dispatchInputEvents(element, inputType, data = null) {
-    if (!(element instanceof HTMLElement)) {
-      return;
-    }
-
-    const beforeInputEvent = new InputEvent("beforeinput", {
-      bubbles: true,
-      cancelable: true,
-      inputType,
-      data
-    });
-    const inputEvent = new InputEvent("input", {
-      bubbles: true,
-      cancelable: false,
-      inputType,
-      data
-    });
-
-    element.dispatchEvent(beforeInputEvent);
-    element.dispatchEvent(inputEvent);
-    element.dispatchEvent(new Event("change", {
-      bubbles: true
-    }));
-  }
-
   function getEditorText(editor) {
     const editorRoot = resolveEditorRoot(editor);
 
@@ -612,38 +722,65 @@
     return normalizeText(editorRoot.textContent.replace(/\uFEFF/g, ""));
   }
 
-  function applyTextToEditor(editor, prompt) {
+  async function waitForSlateCommit(editorRoot, prompt, timeoutMs = 600, intervalMs = 60) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (isPromptCommittedToSlateModel(editorRoot, prompt)) {
+        return true;
+      }
+      await delay(intervalMs);
+    }
+    return isPromptCommittedToSlateModel(editorRoot, prompt);
+  }
+
+  async function applyTextToEditor(editor, prompt) {
     const editorRoot = resolveEditorRoot(editor);
 
     if (!(editorRoot instanceof HTMLElement)) {
       return;
     }
 
-    let slateParagraph = getSlateParagraph(editorRoot);
+    // Slate owns the DOM inside editorRoot. Strategies that mutate the DOM
+    // directly (document.execCommand) crash Slate's reconciler with
+    // "NotFoundError: removeChild" because React tracks one DOM tree while
+    // execCommand silently mutates another. Stick to event-based strategies
+    // that go through Slate's own onCompositionEnd / onBeforeInput / onPaste
+    // handlers — those run Slate transforms cleanly.
+    const initialParagraph = getSlateParagraph(editorRoot);
+    activateEditorForTyping(editorRoot, initialParagraph);
+    await delay(40);
 
-    if (!(slateParagraph instanceof HTMLParagraphElement)) {
-      slateParagraph = document.createElement("p");
-      slateParagraph.setAttribute("data-slate-node", "element");
-      editorRoot.replaceChildren(slateParagraph);
+    const strategies = [
+      tryInsertTextWithComposition,
+      tryInsertTextWithBeforeInput,
+      tryInsertTextWithPasteEvent
+    ];
+
+    for (const strategy of strategies) {
+      // Re-fetch the paragraph each iteration. Slate replaces the <p> node
+      // when it commits, so a cached reference becomes detached and any
+      // subsequent setSelection on it throws "addRange isn't in document".
+      const freshParagraph = getSlateParagraph(editorRoot);
+
+      try {
+        strategy(editorRoot, freshParagraph, prompt);
+      } catch (error) {
+        console.warn(`Flow Helper strategy ${strategy.name} threw`, error);
+      }
+
+      if (await waitForSlateCommit(editorRoot, prompt)) {
+        break;
+      }
     }
 
-    activateEditorForTyping(editorRoot, slateParagraph);
-    let applied = tryInsertTextWithExecCommand(editorRoot, slateParagraph, prompt);
-
-    if (!applied) {
-      applied = tryInsertTextWithBeforeInput(editorRoot, slateParagraph, prompt);
+    const finalParagraph = getSlateParagraph(editorRoot);
+    if (finalParagraph instanceof HTMLParagraphElement) {
+      try {
+        setSelectionToParagraph(finalParagraph);
+      } catch (_error) {
+        // Selection failed; Slate will recover on next focus.
+      }
     }
-
-    if (!applied) {
-      applied = tryInsertTextWithPasteEvent(editorRoot, slateParagraph, prompt);
-    }
-
-    if (getEditorText(editorRoot) !== normalizeText(prompt)) {
-      replaceSlateParagraphText(slateParagraph, prompt);
-      dispatchInputEvents(editorRoot, "insertText", prompt);
-    }
-
-    setSelectionToParagraph(slateParagraph);
   }
 
   function dispatchPointerSequence(element) {
@@ -683,21 +820,28 @@
     }
 
     const rect = element.getBoundingClientRect();
-    // In background tabs rect is always 0 — treat as background
     const inBackground = isBackgroundTab() || (rect.width === 0 && rect.height === 0);
 
-    console.log(`Flow Helper: Clicking element in ${inBackground ? 'background' : 'foreground'} mode`);
+    console.log(`Flow Helper: Clicking element in ${inBackground ? 'background' : 'foreground'} mode`, element.tagName, element.className.slice(0, 60));
 
-    // Only scroll and focus if we are in foreground
-    if (!inBackground) {
-      element.scrollIntoView({
-        block: "center",
-        inline: "center"
-      });
-      element.focus?.();
+    // Always try to scroll and focus — even in background, .focus() can
+    // help React recognise the element as interactive.
+    try {
+      element.scrollIntoView({ block: "center", inline: "center" });
+    } catch (_error) {}
+    try {
+      element.focus();
+    } catch (_error) {}
+
+    // --- Strategy 1: trusted .click() (highest compatibility with React) ---
+    try {
+      element.click();
+      console.log("Flow Helper: Trusted .click() dispatched");
+    } catch (error) {
+      console.warn('Flow Helper: Direct click failed:', error);
     }
 
-    // Use centre of viewport as fallback coordinates for background clicks
+    // --- Strategy 2: synthetic pointer + mouse event sequence ---
     const clientX = inBackground ? window.innerWidth / 2 : rect.left + rect.width / 2;
     const clientY = inBackground ? window.innerHeight / 2 : rect.top + rect.height / 2;
 
@@ -711,54 +855,26 @@
       detail: 1
     };
 
-    // Comprehensive event sequence for maximum compatibility
-    const events = [
-      'mouseenter',
-      'mouseover', 
-      'mousedown',
-      'mouseup',
-      'click'
-    ];
-
-    // Dispatch all mouse events
-    events.forEach(eventType => {
-      try {
-        element.dispatchEvent(new MouseEvent(eventType, eventInit));
-      } catch (error) {
-        console.warn(`Flow Helper: Failed to dispatch ${eventType}:`, error);
-      }
-    });
-
-    // Also try pointer events for modern browsers
     try {
       element.dispatchEvent(new PointerEvent('pointerdown', {
-        ...eventInit,
-        pointerId: 1,
-        pointerType: 'mouse',
-        isPrimary: true
+        ...eventInit, pointerId: 1, pointerType: 'mouse', isPrimary: true
       }));
+      element.dispatchEvent(new MouseEvent('mousedown', eventInit));
       element.dispatchEvent(new PointerEvent('pointerup', {
-        ...eventInit,
-        pointerId: 1,
-        pointerType: 'mouse',
-        isPrimary: true
+        ...eventInit, pointerId: 1, pointerType: 'mouse', isPrimary: true
       }));
+      element.dispatchEvent(new MouseEvent('mouseup', eventInit));
+      element.dispatchEvent(new MouseEvent('click', eventInit));
     } catch (error) {
-      console.warn('Flow Helper: Pointer events not supported');
+      console.warn('Flow Helper: Synthetic event sequence failed:', error);
     }
 
-    // Direct click method
-    try {
-      element.click();
-    } catch (error) {
-      console.warn('Flow Helper: Direct click failed:', error);
-    }
-
-    // Force focus and keyboard activation as backup
+    // --- Strategy 3: keyboard Enter as final fallback ---
     try {
       element.focus();
-      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+      element.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
     } catch (error) {
       console.warn('Flow Helper: Keyboard activation failed:', error);
     }
@@ -837,14 +953,31 @@
 
   function sendRuntimeMessage(message) {
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          resolve({ ok: false, error: chrome.runtime.lastError.message });
-          return;
-        }
+      let chromeRuntimeId;
+      try {
+        chromeRuntimeId = chrome?.runtime?.id;
+      } catch (_error) {
+        chromeRuntimeId = undefined;
+      }
 
-        resolve(response || {});
-      });
+      if (!chromeRuntimeId) {
+        resolve({ ok: false, error: "Extension context invalidated" });
+        return;
+      }
+
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          const lastError = chrome.runtime?.lastError;
+          if (lastError) {
+            resolve({ ok: false, error: lastError.message });
+            return;
+          }
+
+          resolve(response || {});
+        });
+      } catch (error) {
+        resolve({ ok: false, error: error?.message || String(error) });
+      }
     });
   }
 
@@ -1090,25 +1223,101 @@
     throw new Error(timeoutMessage);
   }
 
+  async function waitForSubmissionStart(editor, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
+    const intervalMs = Number.isFinite(options.intervalMs) ? options.intervalMs : 250;
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const sendButton = findSendButton(editor);
+
+      if (isSubmissionVisible(editor, sendButton, { acceptDisabledButton: true })) {
+        return true;
+      }
+
+      await delay(intervalMs);
+    }
+
+    throw new Error("Submit click did not start generation");
+  }
+
+  async function forceSubmitClick(editor, options = {}) {
+    const response = await sendRuntimeMessage({
+      type: "FLOW_HELPER_FORCE_SUBMIT_CLICK",
+      selector: "button:has(i.google-symbols)",
+      iconFilter: "arrow_forward",
+      useDebugger: options.useDebugger !== false
+    });
+
+    console.log("Flow Helper: force submit click result:", response);
+
+    if (!response?.ok) {
+      throw new Error(response?.error || response?.mainResult?.error || response?.trustedResult?.error || "Force submit click failed");
+    }
+
+    await waitForSubmissionStart(editor, {
+      timeoutMs: Number.isFinite(options.timeoutMs) ? options.timeoutMs : 7000
+    });
+
+    return response;
+  }
+
   async function fillPromptAndSubmit(prompt) {
+    console.log("Flow Helper: fillPromptAndSubmit — typing prompt in MAIN world first");
+    let mainResult = null;
+
+    try {
+      mainResult = await sendRuntimeMessage({
+        type: "FLOW_HELPER_MAIN_WORLD_TYPE_AND_SUBMIT",
+        prompt: prompt
+      });
+      console.log("Flow Helper: MAIN world type result:", mainResult);
+
+      if (mainResult?.ok) {
+        const editor = resolveEditorRoot(findPromptEditor());
+
+        if (!editor) {
+          throw new Error("Prompt editor not found after MAIN world typing");
+        }
+
+        try {
+          await forceSubmitClick(editor, { timeoutMs: 8000 });
+          console.log("Flow Helper: Forced submit click confirmed after MAIN world typing");
+          return;
+        } catch (error) {
+          console.warn("Flow Helper: Forced submit click did not confirm, trying local fallbacks", error);
+
+          const sendButton = findSendButton(editor);
+          if (sendButton) {
+            await activateSendButton(sendButton, editor);
+            await waitForSubmissionStart(editor, { timeoutMs: 5000 });
+            return;
+          }
+
+          throw error;
+        }
+      }
+    } catch (error) {
+      console.warn("Flow Helper: MAIN world typing failed:", error);
+    }
+
+    console.log("Flow Helper: fillPromptAndSubmit — falling back to content script typing");
     const editor = resolveEditorRoot(findPromptEditor());
 
     if (!editor) {
       throw new Error("Prompt editor not found");
     }
 
-    applyTextToEditor(editor, prompt);
-    await waitForCondition(() => {
-      const sendButton = findSendButton(editor);
-      return (
-        getEditorText(editor) === normalizeText(prompt) ||
-        (Boolean(sendButton) && !isButtonDisabled(sendButton))
-      );
-    }, {
-      timeoutMs: 2500,
-      intervalMs: 150,
-      timeoutMessage: "Prompt text did not appear in the editor"
-    });
+    if (!mainResult?.ok) {
+      await applyTextToEditor(editor, prompt);
+      await waitForCondition(() => {
+        return isPromptCommittedToSlateModel(editor, prompt);
+      }, {
+        timeoutMs: 3000,
+        intervalMs: 150,
+        timeoutMessage: "Prompt text did not appear in the editor"
+      });
+    }
 
     await waitForCondition(() => {
       const sendButton = findSendButton(editor);
@@ -1125,24 +1334,201 @@
       throw new Error("Send button not found");
     }
 
-    clickElement(sendButton);
+    try {
+      await forceSubmitClick(editor, { timeoutMs: 8000 });
+      return;
+    } catch (error) {
+      console.warn("Flow Helper: Force submit click failed, trying local activateSendButton", error);
+    }
 
-    await delay(800);
+    await activateSendButton(sendButton, editor);
+    await waitForSubmissionStart(editor, { timeoutMs: 5000 });
+  }
 
-    const looksSubmitted =
+  function isSubmissionVisible(editor, sendButton, options = {}) {
+    return (
       getVisibleProgressElements().length > 0 ||
       getEditorText(editor) === "" ||
-      isButtonDisabled(sendButton);
+      (
+        options.acceptDisabledButton === true &&
+        sendButton instanceof HTMLButtonElement &&
+        isButtonDisabled(sendButton)
+      )
+    );
+  }
 
-    if (!looksSubmitted) {
-      sendButton = findSendButton(editor);
-
-      if (!sendButton) {
-        throw new Error("Send button disappeared before retry");
-      }
-
-      clickElement(sendButton);
+  // Simulate a real user click with proper timing between pointer events.
+  // React 18+ batches events per-task; firing everything synchronously in
+  // one microtask means React only sees the final "click" without the
+  // preceding pointerdown/mousedown state transitions that its internal
+  // event system expects. Adding await delay() between each step lets the
+  // browser run a full task boundary so React processes each event.
+  async function asyncClickElement(element) {
+    if (!(element instanceof HTMLElement)) {
+      throw new Error("Element is missing");
     }
+
+    const rect = element.getBoundingClientRect();
+    const inBackground = isBackgroundTab() || (rect.width === 0 && rect.height === 0);
+    const clientX = inBackground ? window.innerWidth / 2 : rect.left + rect.width / 2;
+    const clientY = inBackground ? window.innerHeight / 2 : rect.top + rect.height / 2;
+
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      button: 0,
+      view: window,
+      detail: 1
+    };
+
+    const pointerInit = {
+      ...eventInit,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true
+    };
+
+    try { element.scrollIntoView({ block: "center", inline: "center" }); } catch (_e) {}
+    try { element.focus(); } catch (_e) {}
+
+    // Full browser-native sequence with task boundaries
+    element.dispatchEvent(new PointerEvent("pointerover", pointerInit));
+    element.dispatchEvent(new PointerEvent("pointerenter", { ...pointerInit, bubbles: false }));
+    element.dispatchEvent(new MouseEvent("mouseover", eventInit));
+    element.dispatchEvent(new MouseEvent("mouseenter", { ...eventInit, bubbles: false }));
+    await delay(30);
+
+    element.dispatchEvent(new PointerEvent("pointerdown", pointerInit));
+    await delay(30);
+    element.dispatchEvent(new MouseEvent("mousedown", eventInit));
+    await delay(80);
+
+    element.dispatchEvent(new PointerEvent("pointerup", pointerInit));
+    await delay(30);
+    element.dispatchEvent(new MouseEvent("mouseup", eventInit));
+    await delay(30);
+
+    element.dispatchEvent(new MouseEvent("click", eventInit));
+    await delay(50);
+
+    console.log("Flow Helper: asyncClickElement completed", element.tagName);
+  }
+
+  async function activateSendButton(initialButton, editor) {
+    // Ensure the editor has focus first
+    try { editor.focus(); } catch (_error) {}
+    await delay(50);
+
+    let sendButton = findSendButton(editor) || initialButton;
+
+    // ── Attempt 1: MAIN WORLD click via chrome.scripting.executeScript ──
+    // Content scripts run in an isolated JS world. Events dispatched from
+    // the isolated world share the same DOM but React's event delegation
+    // (attached in the MAIN world) may not process them correctly.
+    // Executing the click in the MAIN world ensures React handles it.
+    console.log("Flow Helper: activateSendButton attempt 1 — MAIN world click");
+    try {
+      const mainWorldResult = await sendRuntimeMessage({
+        type: "FLOW_HELPER_MAIN_WORLD_CLICK",
+        selector: "button:has(i.google-symbols)",
+        iconFilter: "arrow_forward"
+      });
+      console.log("Flow Helper: MAIN world result:", mainWorldResult);
+    } catch (error) {
+      console.warn("Flow Helper: MAIN world click failed:", error);
+    }
+    await delay(1500);
+
+    if (isSubmissionVisible(editor, sendButton)) {
+      console.log("Flow Helper: Submission detected after attempt 1 (MAIN world)");
+      return;
+    }
+
+    // ── Attempt 2: async timed pointer sequence from content script ──
+    sendButton = findSendButton(editor) || sendButton;
+    console.log("Flow Helper: activateSendButton attempt 2 — async pointer sequence");
+    await asyncClickElement(sendButton);
+    await delay(800);
+
+    if (isSubmissionVisible(editor, sendButton)) {
+      console.log("Flow Helper: Submission detected after attempt 2");
+      return;
+    }
+
+    // ── Attempt 3: click the <i> icon inside the button ──
+    sendButton = findSendButton(editor) || sendButton;
+    const iconElement = sendButton.querySelector("i") || sendButton.firstElementChild;
+    if (iconElement instanceof HTMLElement) {
+      console.log("Flow Helper: activateSendButton attempt 3 — click inner icon");
+      await asyncClickElement(iconElement);
+      await delay(800);
+
+      if (isSubmissionVisible(editor, sendButton)) {
+        console.log("Flow Helper: Submission detected after attempt 3 (icon)");
+        return;
+      }
+    }
+
+    // ── Attempt 4: Ctrl+Enter on editor ──
+    console.log("Flow Helper: activateSendButton attempt 4 — Ctrl+Enter");
+    try {
+      editor.focus();
+      await delay(50);
+      const keyOpts = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true, ctrlKey: true };
+      editor.dispatchEvent(new KeyboardEvent("keydown", keyOpts));
+      editor.dispatchEvent(new KeyboardEvent("keypress", keyOpts));
+      editor.dispatchEvent(new KeyboardEvent("keyup", { ...keyOpts, cancelable: false }));
+    } catch (error) {
+      console.warn("Flow Helper: Ctrl+Enter failed", error);
+    }
+    await delay(800);
+
+    if (isSubmissionVisible(editor, sendButton)) {
+      console.log("Flow Helper: Submission detected after attempt 4");
+      return;
+    }
+
+    // ── Attempt 5: Enter on editor ──
+    console.log("Flow Helper: activateSendButton attempt 5 — Enter");
+    try {
+      editor.focus();
+      await delay(50);
+      const keyOpts = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
+      editor.dispatchEvent(new KeyboardEvent("keydown", keyOpts));
+      editor.dispatchEvent(new KeyboardEvent("keypress", keyOpts));
+      editor.dispatchEvent(new KeyboardEvent("keyup", { ...keyOpts, cancelable: false }));
+    } catch (error) {
+      console.warn("Flow Helper: Enter failed", error);
+    }
+    await delay(800);
+
+    if (isSubmissionVisible(editor, sendButton)) {
+      console.log("Flow Helper: Submission detected after attempt 5");
+      return;
+    }
+
+    // ── Attempt 6: MAIN world React fiber onClick ──
+    console.log("Flow Helper: activateSendButton attempt 6 — MAIN world React fiber");
+    try {
+      const fiberResult = await sendRuntimeMessage({
+        type: "FLOW_HELPER_MAIN_WORLD_CLICK",
+        selector: "button",
+        iconFilter: "arrow_forward"
+      });
+      console.log("Flow Helper: MAIN world fiber result:", fiberResult);
+    } catch (error) {
+      console.warn("Flow Helper: attempt 6 failed", error);
+    }
+    await delay(800);
+
+    if (isSubmissionVisible(editor, sendButton)) {
+      console.log("Flow Helper: Submission detected after attempt 6");
+      return;
+    }
+
+    console.warn("Flow Helper: All submit strategies exhausted — submission not detected");
   }
 
   async function waitForGenerationToFinish(options = {}) {

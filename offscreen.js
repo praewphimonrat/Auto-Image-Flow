@@ -20,7 +20,7 @@ function startKeepAlive() {
           console.log("Flow Helper: Silent audio started successfully");
           audioStarted = true;
         }).catch((error) => {
-          console.log("Flow Helper: Silent audio failed (expected without user interaction):", error.message);
+          console.debug("Flow Helper: Silent audio failed (expected without user interaction):", error.message);
           // This is expected - browser blocks autoplay without user interaction
         });
       }
@@ -30,10 +30,30 @@ function startKeepAlive() {
   }
 
   // Keep the service worker alive by pinging it every 20 seconds
-  setInterval(() => {
-    chrome.runtime.sendMessage({ type: "FLOW_HELPER_PING" }).catch(() => {
-      // Ignore if context invalidated
-    });
+  const pingInterval = setInterval(() => {
+    let chromeRuntimeId;
+    try {
+      chromeRuntimeId = chrome?.runtime?.id;
+    } catch (_error) {
+      chromeRuntimeId = undefined;
+    }
+
+    if (!chromeRuntimeId) {
+      clearInterval(pingInterval);
+      return;
+    }
+
+    try {
+      const result = chrome.runtime.sendMessage({ type: "FLOW_HELPER_PING" });
+      if (result && typeof result.catch === "function") {
+        result.catch(() => {
+          // Ignore if context invalidated
+        });
+      }
+    } catch (_error) {
+      // Sync throw when context invalidated — clear interval to stop spam.
+      clearInterval(pingInterval);
+    }
   }, 20000);
 }
 

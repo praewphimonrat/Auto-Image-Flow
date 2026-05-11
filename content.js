@@ -7,6 +7,51 @@ const PANEL_MIN_WIDTH = 320;
 const PANEL_MAX_WIDTH = 400;
 const PANEL_WIDTH_RATIO = 0.28;
 const PANEL_GUTTER = 16;
+const FLOW_HELPER_DEBUG = false;
+
+function installContentConsoleFilter() {
+  if (FLOW_HELPER_DEBUG || window.__flowHelperContentConsoleFiltered) {
+    return;
+  }
+
+  window.__flowHelperContentConsoleFiltered = true;
+
+  for (const method of ["log", "debug", "warn", "error", "info"]) {
+    const original = console[method]?.bind(console);
+
+    if (typeof original !== "function") {
+      continue;
+    }
+
+    console[method] = (...args) => {
+      const firstArg = String(args[0] || "");
+      if (
+        firstArg.startsWith("Flow Helper") ||
+        firstArg.includes("Flow log submission failed") ||
+        firstArg.includes("batchLog") ||
+        firstArg.includes("Invalid value used as weak map key")
+      ) {
+        return;
+      }
+
+      original(...args);
+    };
+  }
+}
+
+function isExtensionContextValid() {
+  try {
+    return Boolean(chrome?.runtime?.id);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function isContextInvalidatedError(error) {
+  const message = String(error?.message || error || "");
+  return message.includes("Extension context invalidated") ||
+    message.includes("Extension context was invalidated");
+}
 
 const state = {
   isOpen: true,
@@ -99,119 +144,117 @@ function updateProjectInfo() {
   }
 
   // Prevent Chrome from discarding this tab to save memory
-  chrome.runtime.sendMessage({
-    type: "FLOW_HELPER_PREVENT_DISCARD"
-  }).catch(() => {});
+  if (!isExtensionContextValid()) {
+    return;
+  }
+
+  try {
+    const result = chrome.runtime.sendMessage({
+      type: "FLOW_HELPER_PREVENT_DISCARD"
+    });
+    if (result && typeof result.catch === "function") {
+      result.catch(() => {});
+    }
+  } catch (_error) {
+    // Extension context invalidated — silently ignore.
+  }
 }
 
-// Inject a script to spoof visibilityState to "visible" even when hidden
+function installPageQuietMode() {
+  if (!isExtensionContextValid()) {
+    return;
+  }
+
+  try {
+    const result = chrome.runtime.sendMessage({
+      type: "FLOW_HELPER_INSTALL_QUIET_MODE"
+    });
+
+    if (result && typeof result.catch === "function") {
+      result.catch(() => {});
+    }
+  } catch (_error) {
+    // Extension context invalidated — silently ignore.
+  }
+}
+
+// Lightly spoof visibility so Google Labs Flow does not throttle generation
+// when the tab is in the background. Anything heavier (RAF, IntersectionObserver,
+// blur/focusout listeners, window.focus) breaks React/Slate on labs.google.
 function injectVisibilitySpoofer() {
   try {
-    // Instead of injecting inline script, we'll modify the page directly
     if (window.__flowHelperVisibilitySpoofed) return;
     window.__flowHelperVisibilitySpoofed = true;
 
-    // Override document properties
-    Object.defineProperty(document, 'visibilityState', { 
-      value: 'visible', 
-      writable: false, 
-      configurable: true 
-    });
-    
-    Object.defineProperty(document, 'hidden', { 
-      value: false, 
-      writable: false, 
-      configurable: true 
-    });
-    
-    Object.defineProperty(document, 'hasFocus', { 
-      value: () => true, 
-      writable: false, 
-      configurable: true 
+    Object.defineProperty(document, 'visibilityState', {
+      get: () => 'visible',
+      configurable: true
     });
 
-    // Prevent focus stealing
-    if (window.focus) {
-      window.focus = function() {};
-    }
+    Object.defineProperty(document, 'hidden', {
+      get: () => false,
+      configurable: true
+    });
 
-    // Block visibility change listeners
-    const originalAddEventListener = document.addEventListener;
-    document.addEventListener = function(type, listener, options) {
-      if (type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'blur' || type === 'focusout') {
-        return; // Block these listeners
+    const originalHasFocus = document.hasFocus.bind(document);
+    document.hasFocus = function flowHelperHasFocus() {
+      try {
+        return originalHasFocus() || true;
+      } catch (_error) {
+        return true;
       }
-      return originalAddEventListener.call(this, type, listener, options);
     };
 
-    // Block window-level listeners
-    const originalWindowAddEventListener = window.addEventListener;
-    window.addEventListener = function(type, listener, options) {
-      if (type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'blur' || type === 'focusout') {
+    const VISIBILITY_EVENTS = new Set(['visibilitychange', 'webkitvisibilitychange']);
+
+    const originalDocumentAdd = document.addEventListener.bind(document);
+    document.addEventListener = function(type, listener, options) {
+      if (VISIBILITY_EVENTS.has(type)) {
         return;
       }
-      return originalWindowAddEventListener.call(this, type, listener, options);
+      return originalDocumentAdd(type, listener, options);
     };
 
-    // Shim requestAnimationFrame
-    const originalRAF = window.requestAnimationFrame;
-    window.requestAnimationFrame = function(callback) {
-      return setTimeout(() => {
-        callback(performance.now());
-      }, 16);
+    const originalWindowAdd = window.addEventListener.bind(window);
+    window.addEventListener = function(type, listener, options) {
+      if (VISIBILITY_EVENTS.has(type)) {
+        return;
+      }
+      return originalWindowAdd(type, listener, options);
     };
 
-    // Dispatch events to clear existing states
-    window.dispatchEvent(new Event('visibilitychange'));
-    window.dispatchEvent(new Event('focus'));
-
-    // Spoof IntersectionObserver
-    const OriginalObserver = window.IntersectionObserver;
-    if (OriginalObserver) {
-      window.IntersectionObserver = function(callback, options) {
-        const observer = new OriginalObserver(callback, options);
-        const originalObserve = observer.observe;
-        
-        observer.observe = function(target) {
-          setTimeout(() => {
-            callback([{
-              target: target,
-              isIntersecting: true,
-              intersectionRatio: 1,
-              boundingClientRect: target.getBoundingClientRect(),
-              intersectionRect: target.getBoundingClientRect(),
-              rootBounds: {},
-              time: Date.now()
-            }], observer);
-          }, 0);
-          return originalObserve.call(this, target);
-        };
-        return observer;
-      };
-      window.IntersectionObserver.prototype = OriginalObserver.prototype;
-    }
-
-    console.log("Flow Helper: Visibility and Intersection spoofed");
+    console.log("Flow Helper: Visibility spoofed (minimal)");
   } catch (error) {
     console.warn("Flow Helper: Could not inject visibility spoofer", error);
   }
 }
 
 function persistOpenState() {
+  if (!isExtensionContextValid()) {
+    return;
+  }
+
   try {
     chrome.storage.local.set({
       [FLOW_HELPER_STORAGE_KEY]: state.isOpen
     });
   } catch (error) {
-    console.warn("Flow Helper could not persist panel state", error);
+    if (!isContextInvalidatedError(error)) {
+      console.warn("Flow Helper could not persist panel state", error);
+    }
   }
 }
 
 function loadOpenState() {
   return new Promise((resolve) => {
+    if (!isExtensionContextValid()) {
+      resolve(true);
+      return;
+    }
+
     try {
       chrome.storage.local.get([FLOW_HELPER_STORAGE_KEY], (result) => {
-        if (chrome.runtime.lastError) {
+        if (chrome.runtime?.lastError) {
           resolve(true);
           return;
         }
@@ -219,7 +262,9 @@ function loadOpenState() {
         resolve(result[FLOW_HELPER_STORAGE_KEY] !== false);
       });
     } catch (error) {
-      console.warn("Flow Helper could not load panel state", error);
+      if (!isContextInvalidatedError(error)) {
+        console.warn("Flow Helper could not load panel state", error);
+      }
       resolve(true);
     }
   });
@@ -388,7 +433,9 @@ function watchNavigationChanges() {
 }
 
 async function boot() {
+  installContentConsoleFilter();
   injectVisibilitySpoofer();
+  installPageQuietMode();
   createPanel();
   createOpenerButton();
   observeBodyChanges();
