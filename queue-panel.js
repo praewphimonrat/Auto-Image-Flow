@@ -6,6 +6,10 @@
   const FLOW_HELPER_ROOT_ID = "autogen-flow-helper-root";
   const STORAGE_KEY = "flowHelperQueueStateByProject";
   const RETRY_LIMIT = 3;
+  // Separate budget for "Flow said the generation failed" auto-retries so a
+  // flaky backend doesn't burn the normal stage retry budget. Once exceeded
+  // the item moves to "error" and the user can hit Retry manually.
+  const GENERATION_FAILURE_LIMIT = 5;
   const DEFAULT_DOWNLOAD_MODE = "network";
   const DOWNLOAD_MODE_LABELS = {
     network: "Network",
@@ -262,6 +266,7 @@
       status: ["queued", "running", "paused", "completed", "error"].includes(item?.status) ? item.status : "queued",
       stage: STAGE_LABELS[stage] ? stage : "input",
       stageAttempts: Number.isFinite(item?.stageAttempts) ? item.stageAttempts : 0,
+      generationFailureCount: Number.isFinite(item?.generationFailureCount) ? item.generationFailureCount : 0,
       networkCaptureStartedAt: Number.isFinite(item?.networkCaptureStartedAt) ? item.networkCaptureStartedAt : 0,
       lastError: typeof item?.lastError === "string" ? item.lastError : "",
       createdAt: typeof item?.createdAt === "string" ? item.createdAt : now,
@@ -410,6 +415,7 @@
       status: "queued",
       stage: "input",
       stageAttempts: 0,
+      generationFailureCount: 0,
       networkCaptureStartedAt: 0,
       lastError: "",
       createdAt: now,
@@ -870,6 +876,7 @@
     queueItem.status = "queued";
     queueItem.stage = "input";
     queueItem.stageAttempts = 0;
+    queueItem.generationFailureCount = 0;
     queueItem.lastError = "";
     queueItem.updatedAt = new Date().toISOString();
 
@@ -1025,6 +1032,16 @@
         queueItem.stage = "input";
         await persistQueueState();
       } catch (error) {
+        if (isGenerationFailedError(error, actions)) {
+          const handled = await handleGenerationFailure(queueItem, error, actions);
+
+          if (handled) {
+            continue;
+          }
+          // Budget exhausted → fall through to normal stage-failure handling
+          // so the item is marked as "error" the standard way.
+        }
+
         await handleStageFailure(queueItem, error);
 
         if (queueItem.status === "error") {
@@ -1034,6 +1051,59 @@
     }
 
     throw new QueuePausedError("Queue paused");
+  }
+
+  function isGenerationFailedError(error, actions) {
+    if (!error) {
+      return false;
+    }
+
+    if (actions?.GenerationFailedError && error instanceof actions.GenerationFailedError) {
+      return true;
+    }
+
+    return error?.name === "GenerationFailedError";
+  }
+
+  // Returns true when the queue should keep going (auto re-submit), false when
+  // we've hit GENERATION_FAILURE_LIMIT and the caller should fall through to
+  // the normal failure path.
+  async function handleGenerationFailure(queueItem, error, actions) {
+    queueItem.generationFailureCount = (queueItem.generationFailureCount || 0) + 1;
+
+    if (queueItem.generationFailureCount > GENERATION_FAILURE_LIMIT) {
+      queueItem.lastError = `Flow generation failed ${queueItem.generationFailureCount - 1} times in a row`;
+      return false;
+    }
+
+    try {
+      if (typeof actions?.dismissErrorToast === "function") {
+        await actions.dismissErrorToast();
+      }
+    } catch (dismissError) {
+      console.warn("Flow Helper: dismissErrorToast threw", dismissError);
+    }
+
+    // Restart this item from scratch so the next loop iteration types the
+    // prompt and clicks send again. Don't burn the normal stage retry budget
+    // — server-side failures are not the same class of bug as a stuck DOM.
+    queueItem.stage = "input";
+    queueItem.stageAttempts = 0;
+    queueItem.networkCaptureStartedAt = 0;
+    queueItem.lastError = error instanceof Error ? error.message : String(error);
+    queueItem.updatedAt = new Date().toISOString();
+
+    state.queueState.statusMessage =
+      `Flow ขึ้น "ล้มเหลว" — ส่ง prompt ใหม่ (${queueItem.generationFailureCount}/${GENERATION_FAILURE_LIMIT})`;
+    setRuntimeStatus(state.queueState.statusMessage);
+
+    await persistQueueState();
+    renderQueueUi();
+
+    // Brief pause so the toast can fade out and Flow can reset its own
+    // submit state before we type again.
+    await actions.delay(1500);
+    return true;
   }
 
   async function processQueue() {

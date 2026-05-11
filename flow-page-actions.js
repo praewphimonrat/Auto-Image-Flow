@@ -8,6 +8,16 @@
   let lastDownloadActivationKey = "";
   let lastDownloadActivationAt = 0;
 
+  // Flow shows a top-right toast "ล้มเหลว / อ๊ะ เกิดข้อผิดพลาด" when generation
+  // fails server-side. We throw this so the queue can dismiss it and re-submit
+  // the same prompt instead of burning a retry on the wait stage.
+  class GenerationFailedError extends Error {
+    constructor(message) {
+      super(message || "Flow reported a generation failure");
+      this.name = "GenerationFailedError";
+    }
+  }
+
   function normalizeText(value) {
     return String(value || "")
       .replace(/[ \t\f\v]+/g, " ")
@@ -238,6 +248,136 @@
         buttonText.toLowerCase().includes("archive")
       );
     }, referenceElement);
+  }
+
+  // Match Thai or English Flow error toast. The styled-component class names
+  // (sc-adc89304-*) churn between builds, so detect by icon + copy instead.
+  const ERROR_TOAST_TEXT_PATTERNS = [
+    "ล้มเหลว",
+    "เกิดข้อผิดพลาด",
+    "อ๊ะ",
+    "something went wrong",
+    "failed",
+    "error occurred"
+  ];
+
+  function getFlowErrorIconElements() {
+    return Array.from(document.querySelectorAll("i.google-symbols")).filter((icon) => {
+      if (!(icon instanceof HTMLElement)) {
+        return false;
+      }
+
+      if (icon.closest(`#${FLOW_HELPER_ROOT_ID}`)) {
+        return false;
+      }
+
+      const iconText = normalizeText(icon.textContent).toLowerCase();
+      return iconText === "warning" || iconText === "error" || iconText === "error_outline";
+    });
+  }
+
+  function elementHasErrorCopy(element) {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    const text = normalizeText(element.textContent).toLowerCase();
+    return ERROR_TOAST_TEXT_PATTERNS.some((pattern) => text.includes(pattern.toLowerCase()));
+  }
+
+  function findErrorToast() {
+    for (const icon of getFlowErrorIconElements()) {
+      // Walk up a few ancestors to find the toast container that holds both
+      // the warning icon and the failure copy.
+      let candidate = icon.parentElement;
+      for (let depth = 0; depth < 5 && candidate instanceof HTMLElement; depth += 1) {
+        if (elementHasErrorCopy(candidate) && isVisible(candidate)) {
+          return candidate;
+        }
+        candidate = candidate.parentElement;
+      }
+    }
+
+    // Fallback: any visible element that mentions the failure phrases without
+    // an icon (older toast variants).
+    const phraseNodes = Array.from(document.querySelectorAll("div, span, p")).filter((node) => {
+      if (!(node instanceof HTMLElement) || node.closest(`#${FLOW_HELPER_ROOT_ID}`)) {
+        return false;
+      }
+
+      const text = normalizeText(node.textContent).toLowerCase();
+      // Require BOTH phrases ("ล้มเหลว" + "เกิดข้อผิดพลาด") so we don't trip
+      // on regular UI copy that just happens to share a word.
+      return (
+        text.includes("ล้มเหลว") &&
+        text.includes("เกิดข้อผิดพลาด") &&
+        isVisible(node)
+      );
+    });
+
+    return phraseNodes[0] || null;
+  }
+
+  function findErrorToastDismissButton(toast) {
+    if (!(toast instanceof HTMLElement)) {
+      return null;
+    }
+
+    // Look inside the toast for a button matching a close affordance.
+    const buttons = Array.from(toast.querySelectorAll("button")).filter((button) => {
+      return button instanceof HTMLButtonElement && isVisible(button) && !isButtonDisabled(button);
+    });
+
+    for (const button of buttons) {
+      const aria = (button.getAttribute("aria-label") || "").toLowerCase();
+      const iconText = normalizeText(
+        Array.from(button.querySelectorAll("i")).map((icon) => icon.textContent).join(" ")
+      ).toLowerCase();
+      const label = normalizeText(button.textContent).toLowerCase();
+
+      if (
+        aria.includes("close") ||
+        aria.includes("dismiss") ||
+        aria.includes("ปิด") ||
+        iconText === "close" ||
+        iconText === "cancel" ||
+        label.includes("ปิด") ||
+        label.includes("ลองอีก") ||
+        label.includes("retry") ||
+        label.includes("try again")
+      ) {
+        return button;
+      }
+    }
+
+    // No labelled button — fall back to the first button inside the toast,
+    // which on Flow is the close X.
+    return buttons[0] || null;
+  }
+
+  async function dismissErrorToast() {
+    const toast = findErrorToast();
+
+    if (!toast) {
+      return false;
+    }
+
+    const dismissButton = findErrorToastDismissButton(toast);
+
+    if (dismissButton) {
+      try {
+        clickElement(dismissButton);
+      } catch (error) {
+        console.warn("Flow Helper: dismissErrorToast click failed", error);
+      }
+    }
+
+    // Give the toast a moment to fade out before the caller looks for the
+    // editor again. If the toast lingers (no dismiss button worked), still
+    // proceed — the next fillPromptAndSubmit will type over whatever state
+    // the editor is in.
+    await delay(400);
+    return true;
   }
 
   function getVisibleProgressElements() {
@@ -1123,6 +1263,10 @@
     while (Date.now() - startedAt < timeoutMs) {
       check();
 
+      if (findErrorToast()) {
+        throw new GenerationFailedError("Flow error toast appeared while waiting for network image");
+      }
+
       const entry = await getLatestNetworkImageEntry(after);
 
       if (entry?.url) {
@@ -1229,6 +1373,10 @@
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
+      if (findErrorToast()) {
+        throw new GenerationFailedError("Flow error toast appeared right after submit");
+      }
+
       const sendButton = findSendButton(editor);
 
       if (isSubmissionVisible(editor, sendButton, { acceptDisabledButton: true })) {
@@ -1542,6 +1690,10 @@
     while (Date.now() - startedAt < timeoutMs) {
       check();
 
+      if (findErrorToast()) {
+        throw new GenerationFailedError("Flow error toast appeared while waiting for generation to finish");
+      }
+
       const progressElements = getVisibleProgressElements();
       const downloadButton = findDownloadButton();
 
@@ -1682,6 +1834,9 @@
     resetNetworkCapture,
     waitForNetworkImage,
     downloadLatestNetworkImage,
-    archiveResult
+    archiveResult,
+    findErrorToast,
+    dismissErrorToast,
+    GenerationFailedError
   };
 })();
